@@ -1,0 +1,47 @@
+services:
+  backend:
+    build: .
+    image: ai-task-runner-backend:latest
+    container_name: ai-task-runner
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      # ENVIRONMENT=production => Groq-only LLM access (no Ollama), auth fails
+      # closed unless DEMO_TOKENS is set in .env.production.
+      - ENVIRONMENT=production
+      - PYTHONPATH=/app
+    ports:
+      - "127.0.0.1:8000:8000"   # only Caddy/nginx reaches the app publicly
+    volumes:
+      # The app needs the host Docker daemon to run sandboxed code.
+      # Rootless Docker is NOT supported by this mount; use the system socket.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Join the host "docker" group so the in-container user can use the socket.
+    group_add:
+      - "${DOCKER_GID:-999}"
+    mem_limit: 1200m             # fits comfortably in Always Free 4 GB ARM
+    cpus: 3.0                    # leave headroom for the OS + sandbox tasks
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2
+    container_name: ai-task-runner-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

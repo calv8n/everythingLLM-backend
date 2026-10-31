@@ -1,0 +1,32 @@
+# Caddy reverse proxy for the AI Task Runner demo.
+# Replace with your Oracle Cloud public IP or a DNS name you own.
+# Let's Encrypt certificates are issued automatically when using a DNS name;
+# with a bare IP, Caddy cannot get a cert and will serve plain HTTP — in that
+# case put an OCI load balancer / self-signed setup in front, or use DuckDNS.
+
+:80 {
+    # Basic rate limiting per client IP (demo scale: 5-6 users)
+    @limited remote_ip private_ranges
+    respond @limited "Forbidden" 403
+
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
+
+    handle /ws/* {
+        reverse_proxy backend:8000
+    }
+
+    handle /healthz {
+        reverse_proxy backend:8000
+    }
+
+    # Serve the frontend build here if you host it on the same VM:
+    # root * /srv/frontend
+    # try_files {path} /index.html
+    # file_server
+
+    log {
+        output file /data/access.log
+    }
+}
