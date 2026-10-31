@@ -2,10 +2,11 @@ import asyncio
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 
 from ...config import settings
 from ...models import TaskRequest, TaskResponse
+from ..security import require_http_auth
 from ..services.event_bus import create_bus
 from ..services.orchestrator import run_task
 
@@ -13,8 +14,20 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 @router.post("/api/task", response_model=TaskResponse)
-async def create_task(request: TaskRequest):
+async def create_task(
+    request: TaskRequest,
+    authorization: str | None = Header(default=None),
+):
     """Endpoint to create a new task based on the user prompt."""
+    require_http_auth(authorization)
+
+    # Production (cloud demo): Ollama is not available on the server, so only
+    # the Groq provider is accepted. Locally users may choose either provider.
+    if settings.is_production and request.provider == "ollama":
+        raise HTTPException(
+            status_code=400,
+            detail="Ollama is not available in this deployment. Use provider 'groq' with your own API key.",
+        )
     if request.provider == "groq" and not (request.groq_api_key or "").strip():
         raise HTTPException(status_code=422, detail="A Groq API key is required when Groq is selected.")
     if request.provider == "groq" and not (request.groq_model or "").strip():

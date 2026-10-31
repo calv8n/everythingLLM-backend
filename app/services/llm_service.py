@@ -68,6 +68,17 @@ async def generate_text(
 
     full_response = ""
     token_queue: asyncio.Queue[str | Exception | None] = asyncio.Queue()
+
+    # Environment gate (defense in depth with the router check): cloud demo
+    # runs with ENVIRONMENT=production and has no Ollama server, so requests
+    # without a user-supplied Groq key are rejected instead of silently
+    # falling back to Ollama. Locally, no key means use local Ollama.
+    if api_key is None and settings.is_production:
+        raise ValueError(
+            "No Groq API key provided. This deployment only supports the "
+            "Groq provider; run locally to use Ollama."
+        )
+
     provider = "groq" if api_key is not None else "ollama"
     model = (groq_model or settings.GROQ_MODEL) if api_key is not None else settings.OLLAMA_MODEL
     started_at = time.monotonic()

@@ -20,13 +20,24 @@ class DockerExecutionService:
     def __init__(self, task_id: str | None = None):
         import docker
         
-        self.client = docker.from_env()
+        # Lazy client: constructing DockerExecutionService must not require a
+        # live daemon (unit tests, tooling); the daemon is contacted in
+        # initialize(), which every execution path calls first.
+        self._client = None
         self._docker_errors = docker.errors
         self.image = settings.DOCKER_IMAGE
         self.timeout = settings.EXECUTION_TIMEOUT_SECONDS
         self.mem_limit = settings.CONTAINER_MEMORY_LIMIT
         self._initialized = False
         self.task_id = task_id or "unknown"
+
+    @property
+    def client(self):
+        if self._client is None:
+            import docker
+
+            self._client = docker.from_env()
+        return self._client
 
     def _initialize_sync(self) -> None:
         logger.info("Checking Docker daemon availability task_id=%s", self.task_id)
@@ -61,8 +72,11 @@ class DockerExecutionService:
 
     async def close(self) -> None:
         """Release the Docker HTTP client after the complete task lifecycle."""
+        if self._client is None:
+            return
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self.client.close)
+        await loop.run_in_executor(None, self._client.close)
+        self._client = None
         logger.debug("Docker client connection pool closed")
 
     def _create_tar_achives(self, code: str, requirements: list[str]) -> bytes:
@@ -97,12 +111,16 @@ class DockerExecutionService:
                     "python -m pip install --quiet --disable-pip-version-check "
                     f"{pkgs} 2>&1 && "
                 )
+            # Run as nobody:nogroup with a writable tmpfs at /tmp and
+            # /output; the venv lives on tmpfs because the bind-free
+            # injected /app tree is root-owned and read-only to us.
             run_script = (
                 "#!/bin/bash\n"
                 "set -e\n"
-                "mkdir -p /output\n"
-                "python -m venv /app/.venv\n"
-                "source /app/.venv/bin/activate\n"
+                "export HOME=/tmp\n"
+                "export PIP_CACHE_DIR=/tmp/pip-cache\n"
+                "python -m venv /tmp/.venv\n"
+                "source /tmp/.venv/bin/activate\n"
                 f"{pip_line}python -u /app/main.py"
             )
             run_bytes = run_script.encode('utf-8')
@@ -115,14 +133,27 @@ class DockerExecutionService:
         return buf.read()
 
     def _create_container(self):
-        return self.client.containers.create(
+        # Hardened sandbox for untrusted, LLM-generated code:
+        # all capabilities dropped, no privilege escalation, non-root user,
+        # PID cap. Network egress can be disabled via EXEC_NETWORK_DISABLED
+        # (note: run.sh does `pip install`, so disabling network also means
+        # generated code cannot fetch PyPI packages).
+        kwargs = dict(
             image=self.image,
             command=["bash", "/app/run.sh"],
             mem_limit=self.mem_limit,
             cpu_period=100000,
-            cpu_quota=100000,  
+            cpu_quota=100000,
+            pids_limit=256,
             detach=True,
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges:true"],
+            user="65534:65534",  # nobody:nogroup in python:3.11-slim
         )
+        kwargs["tmpfs"] = {"/tmp": "rw,size=128m,mode=1777", "/output": "rw,size=64m,mode=1777"}
+        if settings.EXEC_NETWORK_DISABLED:
+            kwargs["network_disabled"] = True
+        return self.client.containers.create(**kwargs)
 
     def _extract_output_files(self, container) -> list[dict]:
         """ Get files from /ouput directiory in the container """
