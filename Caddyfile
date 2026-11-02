@@ -3,10 +3,21 @@
 # Let's Encrypt certificates are issued automatically when using a DNS name;
 # with a bare IP, Caddy cannot get a cert and will serve plain HTTP — in that
 # case put an OCI load balancer / self-signed setup in front, or use DuckDNS.
+#
+# The VM is currently reachable at http://129.225.68.122:8080 (Oracle Cloud
+# security lists usually leave 8080 open for VNC-style traffic, so this port
+# is used instead of 80). Change the site address here AND in
+# docker-compose.yml ("8080:80") if you move to a domain/HTTPS later.
 
-:80 {
-    # Basic rate limiting per client IP (demo scale: 5-6 users)
-    @limited remote_ip private_ranges
+129.225.68.122:8080, localhost:8080 {
+    # Demo guard (optional): keep the API off the open internet for clients
+    # outside these ranges. Remove this block to allow any public IP.
+    # NOTE: do NOT use a blanket `private_ranges` block here — Docker's bridge
+    # network (172.16.0.0/12) is private, and depending on how Caddy resolves
+    # the client IP that could reject legitimate proxied traffic.
+    @limited {
+        not remote_ip 172.16.0.0/12 192.168.0.0/16 10.0.0.0/8 host.docker.internal <YOUR_HOME_IP>
+    }
     respond @limited "Forbidden" 403
 
     handle /api/* {

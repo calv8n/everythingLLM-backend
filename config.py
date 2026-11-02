@@ -26,7 +26,11 @@ class Settings(BaseSettings):
     # Disable network for execution containers (blocks pip installs too;
     # enable once wheels are pre-baked or an egress proxy is configured).
     EXEC_NETWORK_DISABLED: bool = False
-    FRONTEND_ORIGIN: str = "http://localhost:5173"
+    # CORS allowed origins. Comma-separated list so several local frontend
+    # dev servers can reach a backend hosted elsewhere (e.g. the Oracle Cloud
+    # VM at http://129.225.68.122:8080). Override via .env:
+    #   FRONTEND_ORIGIN=http://localhost:5173,http://127.0.0.1:5173
+    FRONTEND_ORIGIN: str = "http://localhost:5173,http://127.0.0.1:5173"
     GROQ_API_KEY: str | None = None
 
     # Auth: comma-separated list of valid bearer tokens for the demo users.
@@ -34,6 +38,11 @@ class Settings(BaseSettings):
     # In local dev a single demo token is generated automatically at startup.
     DEMO_TOKENS: str | None = None
     AUTH_ENABLED: bool = True
+
+    @property
+    def frontend_origins(self) -> list[str]:
+        """Parsed list of allowed CORS origins from FRONTEND_ORIGIN."""
+        return [o.strip() for o in (self.FRONTEND_ORIGIN or "").split(",") if o.strip()]
 
     @property
     def is_production(self) -> bool:

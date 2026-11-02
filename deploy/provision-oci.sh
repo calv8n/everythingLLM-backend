@@ -32,11 +32,15 @@ echo "==> Basic host hardening..."
 # SSH: key-only auth (make sure you are already logged in with a key!)
 sudo sed -ri 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 sudo systemctl reload ssh || sudo systemctl reload sshd || true
-# Firewall: only SSH + HTTP/HTTPS (OCI Security Lists/NSGs must also open 80/443)
+# Firewall: SSH + HTTP/HTTPS + 8080. The public endpoint for this demo is
+# http://129.225.68.122:8080, so port 8080 must be open BOTH here in ufw AND
+# in the OCI VCN Security List / NSG ingress rules (Networking -> VCN ->
+# Security Lists -> Add Ingress Rule: TCP 0.0.0.0/0 on port 8080).
 if ! command -v ufw >/dev/null; then sudo apt-get install -y ufw; fi
 sudo ufw allow OpenSSH
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
+sudo ufw allow 8080/tcp
 sudo ufw --force enable
 
 echo
