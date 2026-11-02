@@ -35,6 +35,11 @@ services:
     container_name: ai-task-runner-caddy
     restart: unless-stopped
     ports:
+      # OCI exposes this VM publicly on http://129.225.68.122:8080 — the
+      # Security List must allow TCP ingress on 8080 (it does by default
+      # for VNC; verify in the OCI console under Networking -> VCN ->
+      # Security Lists -> Ingress Rules).
+      - "8080:80"
       - "80:80"
       - "443:443"
     volumes:

@@ -18,7 +18,12 @@ export DOCKER_GID="$(getent group docker | cut -d: -f3)"
 docker compose up -d --build
 
 echo
-echo "Backend health (on the VM):  curl http://localhost:8000/healthz"
-echo "Users call:                  POST /api/task  with  Authorization: Bearer <their token>"
-echo "WebSocket:                   ws://<host>/ws/<task_id>?token=<their token>"
+echo "Public endpoint:  http://129.225.68.122:8080  (Caddy -> backend)"
+echo "Health check:     curl -i http://129.225.68.122:8080/healthz"
+echo "On the VM only:   curl http://localhost:8000/healthz"
+echo "Users call:                  POST http://129.225.68.122:8080/api/task  with  Authorization: Bearer <their token>"
+echo "WebSocket:                   ws://129.225.68.122:8080/ws/<task_id>?token=<their token>"
 echo "Logs:                        docker compose logs -f backend"
+echo
+echo "REMINDER: the OCI VCN Security List / NSG must allow TCP ingress on 8080,"
+echo "otherwise the VM-side firewall is irrelevant and requests time out."

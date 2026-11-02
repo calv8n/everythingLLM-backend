@@ -28,6 +28,60 @@ uvicorn backend.main:app --reload
 
 The API listens on `http://127.0.0.1:8000`. The Vite frontend proxies `/api` and `/ws` to this address.
 
+## Connecting a local frontend to the remote VM backend
+
+The production backend runs on the Oracle Cloud Ubuntu VM behind Caddy at
+**`http://129.225.68.122:8080`**. To let your locally running frontend
+(Vite dev server, e.g. `http://localhost:5173`) call it:
+
+1. **Point the frontend at the VM.** Either set an env var consumed by your
+   API client (e.g. `VITE_API_BASE=http://129.225.68.122:8080`), or change
+   the Vite dev proxy target in `vite.config.ts`:
+
+   ```ts
+   export default defineConfig({
+     plugins: [react()],
+     server: {
+       proxy: {
+         '/api': { target: 'http://129.225.68.122:8080', changeOrigin: true },
+         '/ws':  { target: 'ws://129.225.68.122:8080',    ws: true },
+       },
+     },
+   })
+   ```
+
+   With the proxy approach there is **no CORS involvement at all** (the
+   browser talks only to `localhost`), which is the simplest option.
+
+2. **Or call the VM directly from the browser (CORS).** Then the backend must
+   list your frontend origin. `FRONTEND_ORIGIN` accepts a comma-separated
+   list; in `.env.production` on the VM set e.g.:
+
+   ```
+   FRONTEND_ORIGIN=http://localhost:5173,http://127.0.0.1:5173
+   ```
+
+   Restart with `docker compose up -d`, and send the bearer token:
+   `Authorization: Bearer <DEMO_TOKENS entry>` for REST and
+   `?token=<token>` for WebSockets.
+
+3. **Firewall checklist if requests time out:**
+   - OCI console → Networking → VCN → **Security Lists / NSGs → Ingress**:
+     allow TCP `0.0.0.0/0` on port **8080** (OCI blocks everything not in the
+     security list, regardless of the OS firewall).
+   - On the VM: `sudo ufw allow 8080/tcp` (done by `deploy/provision-oci.sh`).
+   - Verify from anywhere: `curl -i http://129.225.68.122:8080/healthz`
+     should return `{"status":"ok",...}`.
+
+4. **Alternative — SSH tunnel (no public exposure needed):**
+
+   ```bash
+   ssh -N -L 8080:127.0.0.1:8080 ubuntu@129.225.68.122
+   ```
+
+   Then use base URL `http://localhost:8080` in the frontend; CORS origins
+   stay `http://localhost:5173` and nothing new needs to be opened on OCI.
+
 ## Configuration
 
 Settings are defined in `backend/config.py`; the optional backend environment file is `backend/.env` and is gitignored. Do not commit credentials.
