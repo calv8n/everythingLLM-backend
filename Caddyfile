@@ -9,16 +9,16 @@
 # is used instead of 80). Change the site address here AND in
 # docker-compose.yml ("8080:80") if you move to a domain/HTTPS later.
 
-129.225.68.122:8080, localhost:8080 {
-    # Demo guard (optional): keep the API off the open internet for clients
-    # outside these ranges. Remove this block to allow any public IP.
-    # NOTE: do NOT use a blanket `private_ranges` block here — Docker's bridge
-    # network (172.16.0.0/12) is private, and depending on how Caddy resolves
-    # the client IP that could reject legitimate proxied traffic.
-    @limited {
-        not remote_ip 172.16.0.0/12 192.168.0.0/16 10.0.0.0/8 host.docker.internal <YOUR_HOME_IP>
-    }
-    respond @limited "Forbidden" 403
+:8080 {
+    # Demo guard (OPTIONAL — commented out by default so anyone can reach the
+    # API). To restrict access to your own machines only, uncomment the block
+    # below and replace <YOUR_HOME_IP> with your real public IP (find it at
+    # https://ifconfig.me). WARNING: if left uncommented without editing the
+    # IP, every real client gets HTTP 403.
+    #@limited {
+    #    not remote_ip <YOUR_HOME_IP>
+    #}
+    #respond @limited "Forbidden" 403
 
     handle /api/* {
         reverse_proxy backend:8000
