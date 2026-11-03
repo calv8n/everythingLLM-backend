@@ -15,6 +15,9 @@
     # below and replace <YOUR_HOME_IP> with your real public IP (find it at
     # https://ifconfig.me). WARNING: if left uncommented without editing the
     # IP, every real client gets HTTP 403.
+    # NOTE: remote_ip accepts ONLY IP addresses or CIDR ranges (e.g. 1.2.3.4
+    # or 1.2.3.0/24). Hostnames like host.docker.internal are invalid there
+    # and will crash Caddy on startup.
     #@limited {
     #    not remote_ip <YOUR_HOME_IP>
     #}
