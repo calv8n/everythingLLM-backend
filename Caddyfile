@@ -48,10 +48,11 @@
     # The backend sets Content-Security-Policy: sandbox allow-scripts so the
     # generated chart JS runs in an isolated browsing context.
 
-    # Serve the frontend build here if you host it on the same VM:
-    # root * /srv/frontend
-    # try_files {path} /index.html
-    # file_server
+    handle {
+        root * /srv/frontend
+        try_files {path} /index.html
+        file_server
+    }
 
     log {
         output file /data/access.log
