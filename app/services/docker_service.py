@@ -10,6 +10,7 @@ import re
 import shlex
 import tarfile
 import time
+from pathlib import Path
 
 
 from ...config import settings
@@ -130,10 +131,14 @@ class DockerExecutionService:
             # Run as nobody:nogroup with a writable tmpfs at /tmp and
             # /output; the venv lives on tmpfs because the bind-free
             # injected /app tree is root-owned and read-only to us.
-            # Generated code may write artifacts anywhere (relative paths
-            # resolve against WORKDIR /), so after it finishes we sweep any
-            # new files/dirs outside of system paths into /output, which is
-            # the single directory streamed back to the frontend.
+            # Generated code may write artifacts anywhere: relative paths
+            # resolve against WORKDIR / (captured by the sweep below) and
+            # absolute paths like /workspace/out/foo.csv land in the
+            # read-only injected /app tree. To catch those, /app/output is
+            # symlinked to the /output tmpfs *before* the script runs, and
+            # after it finishes we sweep every regular file under /app plus
+            # any stray top-level entry into /output — regardless of file
+            # type (csv, png, xlsx, html, ...).
             sweep = (
                 "find / -xdev -mindepth 1 -maxdepth 1 \\\n"
                 "  ! -name app ! -name output ! -name tmp ! -name proc ! -name sys ! -name dev ! -name etc \\\n"
@@ -141,6 +146,11 @@ class DockerExecutionService:
                 "  ! -name opt ! -name root ! -name home ! -name media ! -name mnt ! -name run \\\n"
                 "  ! -name srv ! -name boot ! -name lost+found ! -name .dockerenv \\\n"
                 "  -exec mv -t /output/ {} + 2>/dev/null || true\n"
+                "if [ -d /app ]; then \\\n"
+                "  find /app -xdev -type f \\\n"
+                "    ! -path '/app/output*' ! -name main.py ! -name run.sh \\\n"
+                "    -exec cp -a -t /output/ {} + 2>/dev/null || true\n"
+                "fi\n"
             )
             run_script = (
                 "#!/bin/bash\n"
@@ -148,6 +158,11 @@ class DockerExecutionService:
                 "export HOME=/tmp\n"
                 "export PIP_CACHE_DIR=/tmp/pip-cache\n"
                 "mkdir -p /output\n"
+                # Redirect writes to /app/output (and common alias dirs) to
+                # the /output tmpfs that gets streamed back to the frontend.
+                "for d in output outputs result results artifact artifacts data out dist build plots charts figures; do \\\n"
+                "  if [ ! -e /app/$d ]; then ln -s /output /app/$d 2>/dev/null || true; fi\n"
+                "done\n"
                 # Sweep stray files out of / before running user code so the
                 # image's original root layout is restored afterwards too.
                 f"{sweep}"
@@ -280,7 +295,17 @@ class DockerExecutionService:
                             name = member.name
                             if name.startswith("output/"):
                                 name = name[len("output/"):]
+                            # Flatten nested paths so downloads/iframes only
+                            # ever deal with a single safe filename segment.
+                            name = Path(name).name
+                            if not name or name == "run.sh":
+                                continue
                             raw_files.append((name, content))
+            if not raw_files:
+                logger.warning(
+                    "No output files found in /output task_id=%s container_id=%s",
+                    self.task_id, getattr(container, "short_id", "?"),
+                )
             return self._build_file_payloads(raw_files)
         except self._docker_errors.NotFound:
             return []
