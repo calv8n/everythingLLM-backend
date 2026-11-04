@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     CODE_RETRY_ATTEMPTS: int = 5
     SESSION_MEMORY_MESSAGES: int = 6
     CONTAINER_MEMORY_LIMIT: str = "512m"
+    # Directory where completed-task output files (CSVs, Plotly HTML charts,
+    # images...) are persisted so the frontend can download/preview them via
+    # /api/task/{id}/files. Mounted as a Docker volume in production.
+    ARTIFACT_DIR: str = "/tmp/backend-artifacts"
     # Disable network for execution containers (blocks pip installs too;
     # enable once wheels are pre-baked or an egress proxy is configured).
     EXEC_NETWORK_DISABLED: bool = False

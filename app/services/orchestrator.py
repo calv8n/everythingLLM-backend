@@ -9,8 +9,24 @@ from .code_validation import ValidationAgent
 from .docker_service import DockerExecutionService
 from .event_bus import EventBus
 from .session_memory import append_message, get_messages
+from ..routers.tasks import save_task_files
 
 logger = logging.getLogger(__name__)
+
+
+def _file_links(task_id: str | None, files: list[dict]) -> list[dict]:
+    """Add REST download/preview URLs to file payloads so the frontend can
+    fetch artifacts independently of the (one-time) WebSocket result event."""
+    if not task_id:
+        return files
+    linked = []
+    for entry in files:
+        name = entry.get("name", "")
+        safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in name) or "file"
+        item = dict(entry)
+        item["url"] = f"/api/task/{task_id}/files/{safe_name}"
+        linked.append(item)
+    return linked
 
 
 async def prepare_task_prompt(
@@ -371,10 +387,16 @@ async def run_task(
                                 attempt,
                             )
                         else:
+                            # Persist artifacts on the host and add REST URLs
+                            # so the frontend can download/preview files even
+                            # after the sandbox container is removed.
+                            if task_id and result_files:
+                                save_task_files(task_id, result_files)
+                            downloadable_files = _file_links(task_id, result_files)
                             await bus.publish({
                                 "type": "result",
                                 "content": result_text,
-                                "files": result_files,
+                                "files": downloadable_files,
                             })
                             if session_id:
                                 append_message(

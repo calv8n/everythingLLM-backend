@@ -16,6 +16,10 @@ services:
       # The app needs the host Docker daemon to run sandboxed code.
       # Rootless Docker is NOT supported by this mount; use the system socket.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Persisted task output files (CSVs, Plotly HTML charts) served by
+      # GET /api/task/{id}/files — kept on a named volume so artifacts
+      # survive rebuilds and container removal.
+      - backend-artifacts:/tmp/backend-artifacts
     # Join the host "docker" group so the in-container user can use the socket.
     group_add:
       - "${DOCKER_GID:-999}"
@@ -50,3 +54,4 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  backend-artifacts:

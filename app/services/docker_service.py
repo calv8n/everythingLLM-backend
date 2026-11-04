@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import logging
 import mimetypes
+import re
 import shlex
 import tarfile
 import time
@@ -15,6 +17,20 @@ from .code_validation import ValidationAgent
 from .event_bus import EventBus
 
 logger = logging.getLogger(__name__)
+
+# Sandbox output limits. Files in /output are streamed back to the frontend,
+# so they must be bounded by size and count; Plotly HTML embeds the ~3-4 MB
+# plotly.js bundle inline, which would otherwise eat the per-file budget.
+MAX_OUTPUT_FILE_BYTES = 10 * 1024 * 1024   # 10 MB per file
+MAX_OUTPUT_FILES = 20                       # files per execution
+MAX_INLINE_PLOTLY_JS_BYTES = 2 * 1024 * 1024  # threshold for CDN rewrite
+
+# Matches the <script> block that carries the inlined plotly.js bundle in
+# figures written with include_plotlyjs=True (or "directory").
+_INLINE_PLOTLY_RE = re.compile(
+    rb"(<script[^>]*>)\s*(window\.Plotly\s*=.*?)(\s*</script>)",
+    re.DOTALL,
+)
 
 class DockerExecutionService:
     def __init__(self, task_id: str | None = None):
@@ -155,8 +171,80 @@ class DockerExecutionService:
             kwargs["network_disabled"] = True
         return self.client.containers.create(**kwargs)
 
+    @staticmethod
+    def _slim_plotly_html(content: bytes) -> bytes:
+        """Replace an inlined plotly.js bundle with a CDN <script> tag.
+
+        Figures written with ``include_plotlyjs=True`` embed ~3-4 MB of
+        JavaScript per file. The frontend renders these HTML outputs inside a
+        sandboxed iframe, so swapping the inline bundle for the official CDN
+        keeps previews identical while shrinking payloads ~10x. Falls back to
+        the original bytes whenever the expected pattern is not found.
+        """
+        if b"window.Plotly" not in content:
+            return content
+        cdn_tag = (
+            b'<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"'
+            b' charset="utf-8"></script>'
+        )
+        slimmed = _INLINE_PLOTLY_RE.sub(
+            lambda m: cdn_tag, content, count=1
+        )
+        if len(slimmed) < len(content):
+            return slimmed
+        return content
+
+    def _build_file_payloads(self, raw_files: list[tuple[str, bytes]]) -> list[dict]:
+        """Convert (name, bytes) pairs into frontend-ready file payloads."""
+        payloads: list[dict] = []
+        skipped: list[str] = []
+        for name, content in raw_files:
+            if len(payloads) >= MAX_OUTPUT_FILES:
+                skipped.append(f"{name} (file limit reached)")
+                continue
+            mime_type = (
+                mimetypes.guess_type(name)[0]
+                or "application/octet-stream"
+            )
+            if mime_type == "text/html" and len(content) > MAX_INLINE_PLOTLY_JS_BYTES:
+                before = len(content)
+                content = self._slim_plotly_html(content)
+                logger.info(
+                    "Plotly HTML slimmed task_id=%s file=%s before_bytes=%d after_bytes=%d",
+                    self.task_id, name, before, len(content),
+                )
+            if len(content) > MAX_OUTPUT_FILE_BYTES:
+                skipped.append(f"{name} ({len(content)} bytes exceeds limit)")
+                logger.warning(
+                    "Output file skipped task_id=%s file=%s size_bytes=%d limit_bytes=%d",
+                    self.task_id, name, len(content), MAX_OUTPUT_FILE_BYTES,
+                )
+                continue
+            payload = {
+                "name": name,
+                "type": mime_type,
+                "encoding": "base64",
+                "data": base64.b64encode(content).decode("utf-8"),
+                "size": len(content),
+            }
+            # Tell the frontend this file is an embeddable interactive chart
+            # (render in a sandboxed iframe) vs. a plain download/preview.
+            if mime_type == "text/html" and b"Plotly.newPlot" in content:
+                payload["kind"] = "plotly"
+            elif mime_type == "text/csv":
+                payload["kind"] = "csv"
+            elif mime_type.startswith("image/"):
+                payload["kind"] = "image"
+            payloads.append(payload)
+        if skipped:
+            logger.warning(
+                "Output files skipped task_id=%s skipped=%s",
+                self.task_id, ", ".join(skipped),
+            )
+        return payloads
+
     def _extract_output_files(self, container) -> list[dict]:
-        """ Get files from /ouput directiory in the container """
+        """Get files from the /output directory in the container."""
         try:
             bits, _ = container.get_archive("/output")
             tar_stream = io.BytesIO()
@@ -164,7 +252,7 @@ class DockerExecutionService:
                 tar_stream.write(chunk)
             tar_stream.seek(0)
 
-            files = []
+            raw_files: list[tuple[str, bytes]] = []
             with tarfile.open(fileobj=tar_stream, mode='r') as tar:
                 for member in tar.getmembers():
                     if member.isfile():
@@ -174,21 +262,28 @@ class DockerExecutionService:
                             name = member.name
                             if name.startswith("output/"):
                                 name = name[len("output/"):]
-                            mime_type = (
-                                mimetypes.guess_type(name)[0]
-                                or "application/octet-stream"
-                            )
-                            files.append(
-                                {
-                                    "name": name,
-                                    "type": mime_type,
-                                    "encoding": "base64",
-                                    "data": base64.b64encode(content).decode("utf-8"),
-                                }
-                            )
-            return files
+                            raw_files.append((name, content))
+            return self._build_file_payloads(raw_files)
         except self._docker_errors.NotFound:
             return []
+
+    async def fetch_output_files(self, container_id: str) -> list[dict]:
+        """Re-download /output from a still-running (or exited) container.
+
+        Used by the GET /api/task/{id}/files endpoint so the frontend can
+        re-fetch artifacts (e.g. after a WebSocket reconnect) instead of
+        relying only on the one-time 'result' event payload.
+        """
+        loop = asyncio.get_event_loop()
+
+        def _fetch() -> list[dict]:
+            try:
+                container = self.client.containers.get(container_id)
+            except self._docker_errors.NotFound:
+                return []
+            return self._extract_output_files(container)
+
+        return await loop.run_in_executor(None, _fetch)
 
     async def execute_code(self, code: str, requirements: list[str], bus: EventBus) -> dict:
         """ Run code in a fresh container and stream logs"""
@@ -282,6 +377,7 @@ class DockerExecutionService:
                 "exit_code": result.get("StatusCode"),
                 "stdout": "\n".join(stdout_lines),
                 "files": files,
+                "container_id": container.id,
             }
 
         except asyncio.TimeoutError:
