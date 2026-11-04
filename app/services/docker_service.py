@@ -139,22 +139,39 @@ class DockerExecutionService:
             # after it finishes we sweep every regular file under /app plus
             # any stray top-level entry into /output — regardless of file
             # type (csv, png, xlsx, html, ...).
+            # Collect every artifact into /output after execution:
+            #  - stray files/dirs at the container root (relative writes,
+            #    since WORKDIR is /), excluding system directories;
+            #  - anything under /app except our own main.py/run.sh and the
+            #    symlinked output dirs.
+            # Files are copied one-by-one with a collision-safe name so two
+            # artifacts sharing a basename never silently overwrite each
+            # other (e.g. /app/report.csv vs /report.csv).
             sweep = (
-                "find / -xdev -mindepth 1 -maxdepth 1 \\\n"
+                "collect_artifacts() { \\\n"
+                "  while IFS= read -r f; do \\\n"
+                "    base=$(basename \"$f\"); target=\"/output/$base\"; n=1; \\\n"
+                "    while [ -e \"$target\" ]; do \\\n"
+                "      stem=\"${base%.*}\"; ext=\"${base##*.}\"; \\\n"
+                "      if [ \"$stem\" = \"$base\" ]; then cand=\"${base}.$n\"; else cand=\"${stem}_$n.${ext}\"; fi; \\\n"
+                "      target=\"/output/$cand\"; n=$((n+1)); \\\n"
+                "    done; \\\n"
+                "    cp -a \"$f\" \"$target\" 2>/dev/null || true; \\\n"
+                "  done < <(find \"$@\" 2>/dev/null); \\\n"
+                "}\n"
+                "collect_artifacts / -xdev -mindepth 1 -maxdepth 1 -type f \\\n"
                 "  ! -name app ! -name output ! -name tmp ! -name proc ! -name sys ! -name dev ! -name etc \\\n"
                 "  ! -name usr ! -name var ! -name lib ! -name lib64 ! -name bin ! -name sbin \\\n"
                 "  ! -name opt ! -name root ! -name home ! -name media ! -name mnt ! -name run \\\n"
-                "  ! -name srv ! -name boot ! -name lost+found ! -name .dockerenv \\\n"
-                "  -exec mv -t /output/ {} + 2>/dev/null || true\n"
+                "  ! -name srv ! -name boot ! -name lost+found ! -name .dockerenv\n"
                 "if [ -d /app ]; then \\\n"
-                "  find /app -xdev -type f \\\n"
-                "    ! -path '/app/output*' ! -name main.py ! -name run.sh \\\n"
-                "    -exec cp -a -t /output/ {} + 2>/dev/null || true\n"
+                "  collect_artifacts /app -xdev -type f \\\n"
+                "    ! -path '/app/output*' ! -name main.py ! -name run.sh\n"
                 "fi\n"
             )
             run_script = (
                 "#!/bin/bash\n"
-                "set -e\n"
+                "set -euo pipefail\n"
                 "export HOME=/tmp\n"
                 "export PIP_CACHE_DIR=/tmp/pip-cache\n"
                 "mkdir -p /output\n"
@@ -163,9 +180,10 @@ class DockerExecutionService:
                 "for d in output outputs result results artifact artifacts data out dist build plots charts figures; do \\\n"
                 "  if [ ! -e /app/$d ]; then ln -s /output /app/$d 2>/dev/null || true; fi\n"
                 "done\n"
-                # Sweep stray files out of / before running user code so the
-                # image's original root layout is restored afterwards too.
-                f"{sweep}"
+                # NOTE: we intentionally do NOT sweep the filesystem *before*
+                # running user code — an overly broad pre-run sweep can delete
+                # essential directories and cause a cryptic exit 1 with no
+                # output at all. Only collect artifacts after execution.
                 "python -m venv /tmp/.venv\n"
                 "source /tmp/.venv/bin/activate\n"
                 f"{pip_line}python -u /app/main.py\n"
