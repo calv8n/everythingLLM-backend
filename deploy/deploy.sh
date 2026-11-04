@@ -20,7 +20,8 @@ docker compose up -d --build
 echo
 echo "Public endpoint:  http://129.225.68.122:8080  (Caddy -> backend)"
 echo "Health check:     curl -i http://129.225.68.122:8080/healthz"
-echo "On the VM only:   curl http://localhost:8000/healthz"
+echo "On the VM only:   docker exec ai-task-runner curl -s http://localhost:8000/healthz"
+echo "                  (port 8000 is NOT published on the host; only Caddy on :8080 is)"
 echo "Users call:                  POST http://129.225.68.122:8080/api/task  with  Authorization: Bearer <their token>"
 echo "WebSocket:                   ws://129.225.68.122:8080/ws/<task_id>?token=<their token>"
 echo "Logs:                        docker compose logs -f backend"
