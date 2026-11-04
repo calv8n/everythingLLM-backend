@@ -105,7 +105,7 @@ Backend defaults are declared in `backend/config.py`; an optional `backend/.env`
 
 For user-selected Groq tasks, the frontend sends the API key and selected model per request. Both are required by the API. The frontend does not persist the key, and the backend does not put it into session memory or logs. Ollama requests omit Groq credentials and use the configured local model.
 
-Session memory is in-process and non-persistent. It retains up to six user/assistant messages by default; restarting the backend clears it.
+Session memory is in-process and non-persistent. It retains up to six user/assistant messages by default; restarting the backend clears it. A follow-up classifier controls whether those messages are included: unrelated or ambiguous requests are treated independently, including during code repair.
 
 ## Source map
 

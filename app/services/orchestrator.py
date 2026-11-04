@@ -3,7 +3,7 @@ import logging
 import time
 
 from ...config import settings
-from .agents import OrchestratorAgent
+from .agents import OrchestratorAgent, classify_follow_up
 from .agent_sandbox import AgentSandbox
 from .code_validation import ValidationAgent
 from .docker_service import DockerExecutionService
@@ -226,6 +226,29 @@ async def run_task(
             context_limit = max(0, settings.SESSION_MEMORY_MESSAGES)
             if context_limit:
                 previous_messages = get_messages(session_id)[-context_limit:]
+            if previous_messages:
+                try:
+                    is_follow_up = await classify_follow_up(
+                        prompt,
+                        previous_messages,
+                        bus,
+                        groq_api_key=groq_api_key,
+                        groq_model=groq_model,
+                    )
+                except ValueError:
+                    logger.warning(
+                        "Follow-up classification failed; treating request as independent task_id=%s",
+                        task_id or "unknown",
+                        exc_info=True,
+                    )
+                    is_follow_up = False
+                if not is_follow_up:
+                    logger.info(
+                        "Prior session context omitted for independent request task_id=%s session_id=%s",
+                        task_id or "unknown",
+                        session_id,
+                    )
+                    previous_messages = []
             append_message(session_id, "user", prompt)
 
         generation_prompt = _build_session_prompt(prompt, previous_messages)

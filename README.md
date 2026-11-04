@@ -61,9 +61,7 @@ The production backend runs on the Oracle Cloud Ubuntu VM behind Caddy at
    FRONTEND_ORIGIN=http://localhost:5173,http://127.0.0.1:5173
    ```
 
-   Restart with `docker compose up -d`, and send the bearer token:
-   `Authorization: Bearer <DEMO_TOKENS entry>` for REST and
-   `?token=<token>` for WebSockets.
+   Restart with `docker compose up -d`. API requests require no authentication.
 
 3. **Firewall checklist if requests time out:**
    - OCI console → Networking → VCN → **Security Lists / NSGs → Ingress**:
@@ -115,12 +113,12 @@ Docker Desktop/Engine must be running. At the start of every task, the service p
 3. The orchestrator initializes Docker, invokes planning and conditional web research, then asks the implementation agent to generate code.
 4. The validation agent parses Python syntax and discovers common third-party imports; missing pip requirements are added before execution.
 5. Docker creates a disposable container, creates `/app/.venv`, installs packages, executes the code, streams logs, and collects `/output` artifacts.
-6. Only a successful exit with no recognized printed failure message is returned as `result`. Failures are sent back to the LLM with prior session context, failed code, and logs, up to the configured retry count.
+6. Previous session messages are supplied to a follow-up classifier; only clearly related requests reuse that context. Only a successful exit with no recognized printed failure message is returned as `result`. Failures are sent back to the LLM with relevant session context, failed code, and logs, up to the configured retry count.
 7. The WebSocket closes when the event bus is finished.
 
 Task request fields: `prompt`, `provider` (`ollama` or `groq`), optional `groq_api_key`, optional `groq_model`, and optional `session_id`. The response contains `task_id` and `session_id`.
 
-Events include `planning`, `code`, `executing`, `log`, `retry`, `result`, and `error`. Result file objects use `name`, `type` (MIME), `encoding` (`base64`), and `data`.
+Events include `planning`, `code`, `executing`, `log`, `retry`, `result`, and `error`. Result file objects include `name`, `type` (MIME), `encoding` (`base64`), and `data`; when persisted, they also include a `url` for downloading or previewing the artifact. `GET /api/task/{task_id}/files` lists persisted files, and `GET /api/task/{task_id}/files/{file_name}` serves each file.
 
 ## Agents and execution
 
@@ -139,7 +137,7 @@ Charts should use Plotly and be saved as standalone HTML under `/output/`. CSV, 
 
 ## Session memory and retries
 
-Session memory is process-local (not persistent across backend restarts) and retains the newest six user/assistant messages by default. Repair prompts include those prior messages, the current user task, failed code, and captured errors/logs. `CODE_RETRY_ATTEMPTS=5` means up to five repairs after the initial attempt.
+Session memory is process-local (not persistent across backend restarts) and retains the newest six user/assistant messages by default. Before planning, a classifier decides whether a new message is a follow-up. Related requests and their repair prompts can use prior messages; independent requests and their repairs receive only the current request. Ambiguous or malformed classifications default to treating the request as independent. `CODE_RETRY_ATTEMPTS=5` means up to five repairs after the initial attempt.
 
 ## Tests and logs
 

@@ -3,12 +3,11 @@ import logging
 import mimetypes
 import uuid
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
 from ...config import settings
 from ...models import TaskRequest, TaskResponse
-from ..security import require_http_auth
 from ..services.artifact_store import get_artifact_path, list_task_files
 from ..services.event_bus import create_bus
 from ..services.orchestrator import run_task
@@ -20,10 +19,8 @@ logger = logging.getLogger(__name__)
 @router.get("/api/task/{task_id}/files")
 async def task_file_index(
     task_id: str,
-    authorization: str | None = Header(default=None),
 ):
     """List downloadable artifacts produced by a completed task."""
-    require_http_auth(authorization)
     return {"task_id": task_id, "files": list_task_files(task_id)}
 
 
@@ -32,11 +29,9 @@ async def download_task_file(
     task_id: str,
     file_name: str,
     inline: bool = False,
-    authorization: str | None = Header(default=None),
 ):
     """Download one artifact. Use ?inline=true to render Plotly HTML/csv in
     the browser (served with a safe Content-Type and no-store)."""
-    require_http_auth(authorization)
     path = get_artifact_path(task_id, file_name)
     if path is None:
         raise HTTPException(status_code=404, detail="Artifact not found.")
@@ -60,11 +55,8 @@ async def download_task_file(
 @router.post("/api/task", response_model=TaskResponse)
 async def create_task(
     request: TaskRequest,
-    authorization: str | None = Header(default=None),
 ):
     """Endpoint to create a new task based on the user prompt."""
-    require_http_auth(authorization)
-
     # Production (cloud demo): Ollama is not available on the server, so only
     # the Groq provider is accepted. Locally users may choose either provider.
     if settings.is_production and request.provider == "ollama":
@@ -101,5 +93,4 @@ async def create_task(
     )
 
     return TaskResponse(task_id=task_id, session_id=session_id)
-
 

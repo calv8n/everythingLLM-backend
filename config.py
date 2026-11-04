@@ -1,16 +1,14 @@
-import secrets
-
-from pydantic_settings import BaseSettings
-
 from pathlib import Path
 
-
-def _generate_demo_tokens() -> str:
-    """Generate one short-lived demo bearer token (used only in local dev)."""
-    return f"demo-{secrets.token_urlsafe(16)}"
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=str(Path(__file__).resolve().parent / ".env"),
+        extra="ignore",
+    )
+
     # Runtime environment: "local" -> users choose Ollama or Groq;
     # "production" (e.g. Oracle Cloud Always Free) -> Groq only, no Ollama.
     ENVIRONMENT: str = "local"
@@ -37,12 +35,6 @@ class Settings(BaseSettings):
     FRONTEND_ORIGIN: str = "http://localhost:5173,http://127.0.0.1:5173"
     GROQ_API_KEY: str | None = None
 
-    # Auth: comma-separated list of valid bearer tokens for the demo users.
-    # In production leave empty to fail closed (all requests rejected with 401).
-    # In local dev a single demo token is generated automatically at startup.
-    DEMO_TOKENS: str | None = None
-    AUTH_ENABLED: bool = True
-
     @property
     def frontend_origins(self) -> list[str]:
         """Parsed list of allowed CORS origins from FRONTEND_ORIGIN."""
@@ -51,19 +43,5 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT.strip().lower() in {"prod", "production", "cloud"}
-
-    @property
-    def allowed_tokens(self) -> frozenset[str]:
-        raw = (self.DEMO_TOKENS or "").strip()
-        if not raw and not self.is_production:
-            raw = _generate_demo_tokens()
-            print(
-                f"[startup] Local demo token (copy it, printed once): {raw}",
-                flush=True,
-            )
-        return frozenset(t.strip() for t in raw.split(",") if t.strip())
-
-    class Config:
-        env_file = str(Path(__file__).resolve().parent / ".env")
 
 settings = Settings()

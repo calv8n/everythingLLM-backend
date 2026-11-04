@@ -6,8 +6,7 @@ services:
     restart: unless-stopped
     env_file: .env.production
     environment:
-      # ENVIRONMENT=production => Groq-only LLM access (no Ollama), auth fails
-      # closed unless DEMO_TOKENS is set in .env.production.
+      # ENVIRONMENT=production => Groq-only LLM access (no Ollama).
       - ENVIRONMENT=production
       - PYTHONPATH=/app
     ports:
@@ -48,6 +47,7 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./frontend-dist:/srv/frontend:ro
       - caddy_data:/data
       - caddy_config:/config
 

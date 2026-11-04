@@ -114,6 +114,16 @@ class DockerExecutionService:
             app_dir.mode = 0o755
             tar.addfile(app_dir)
 
+            venv_dir = tarfile.TarInfo(name='venv')
+            venv_dir.type = tarfile.DIRTYPE
+            venv_dir.mode = 0o777
+            tar.addfile(venv_dir)
+
+            output_dir = tarfile.TarInfo(name='output')
+            output_dir.type = tarfile.DIRTYPE
+            output_dir.mode = 0o777
+            tar.addfile(output_dir)
+
             # main.py
             code_bytes = code.encode('utf-8')
             info = tarfile.TarInfo(name='app/main.py')
@@ -128,14 +138,14 @@ class DockerExecutionService:
                     "python -m pip install --quiet --disable-pip-version-check "
                     f"{pkgs} 2>&1 && "
                 )
-            # Run as nobody:nogroup with a writable tmpfs at /tmp and
-            # /output; the venv lives on tmpfs because the bind-free
-            # injected /app tree is root-owned and read-only to us.
+            # Run as nobody:nogroup. The venv and /output are writable in the
+            # container layer; only transient temporary files use the smaller
+            # /tmp tmpfs.
             # Generated code may write artifacts anywhere: relative paths
             # resolve against WORKDIR / (captured by the sweep below) and
             # absolute paths like /workspace/out/foo.csv land in the
             # read-only injected /app tree. To catch those, /app/output is
-            # symlinked to the /output tmpfs *before* the script runs, and
+            # symlinked to /output *before* the script runs, and
             # after it finishes we sweep every regular file under /app plus
             # any stray top-level entry into /output — regardless of file
             # type (csv, png, xlsx, html, ...).
@@ -173,10 +183,10 @@ class DockerExecutionService:
                 "#!/bin/bash\n"
                 "set -euo pipefail\n"
                 "export HOME=/tmp\n"
-                "export PIP_CACHE_DIR=/tmp/pip-cache\n"
+                "export PIP_NO_CACHE_DIR=1\n"
                 "mkdir -p /output\n"
                 # Redirect writes to /app/output (and common alias dirs) to
-                # the /output tmpfs that gets streamed back to the frontend.
+                # the /output directory that gets streamed back to the frontend.
                 "for d in output outputs result results artifact artifacts data out dist build plots charts figures; do \\\n"
                 "  if [ ! -e /app/$d ]; then ln -s /output /app/$d 2>/dev/null || true; fi\n"
                 "done\n"
@@ -184,8 +194,8 @@ class DockerExecutionService:
                 # running user code — an overly broad pre-run sweep can delete
                 # essential directories and cause a cryptic exit 1 with no
                 # output at all. Only collect artifacts after execution.
-                "python -m venv /tmp/.venv\n"
-                "source /tmp/.venv/bin/activate\n"
+                "python -m venv /venv\n"
+                "source /venv/bin/activate\n"
                 f"{pip_line}python -u /app/main.py\n"
                 # Collect any artifacts written outside /output into /output.
                 f"{sweep}"
@@ -217,7 +227,10 @@ class DockerExecutionService:
             security_opt=["no-new-privileges:true"],
             user="65534:65534",  # nobody:nogroup in python:3.11-slim
         )
-        kwargs["tmpfs"] = {"/tmp": "rw,size=128m,mode=1777", "/output": "rw,size=64m,mode=1777"}
+        # /output is part of the container's writable layer so Docker's
+        # get_archive can read it after the process exits. Docker omits tmpfs
+        # contents from get_archive, even while the container is running.
+        kwargs["tmpfs"] = {"/tmp": "rw,size=128m,mode=1777"}
         if settings.EXEC_NETWORK_DISABLED:
             kwargs["network_disabled"] = True
         return self.client.containers.create(**kwargs)
@@ -395,8 +408,6 @@ class DockerExecutionService:
 
             loop.run_in_executor(None, _stream_logs)
 
-            # Consume logs and publish
-
             while True:
                 try:
                     line = await asyncio.wait_for(
@@ -420,7 +431,6 @@ class DockerExecutionService:
                 loop.run_in_executor(None, container.wait), timeout=30
             )
 
-            # Extract output files
             files = await loop.run_in_executor(
                 None, self._extract_output_files, container
             )

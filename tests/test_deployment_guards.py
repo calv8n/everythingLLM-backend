@@ -1,23 +1,27 @@
-"""Tests for the local-vs-production behavior and demo auth."""
+"""Tests for local-vs-production behavior."""
 import asyncio
 
 import pytest
 from fastapi import HTTPException
 
 from backend.app.routers import tasks
-from backend.config import settings
+from backend.config import Settings, settings
 from backend.models import TaskRequest
 
 
-@pytest.fixture
-def enable_auth(monkeypatch):
-    monkeypatch.setattr(settings, "AUTH_ENABLED", True)
-    monkeypatch.setattr(settings, "DEMO_TOKENS", "tok-a,tok-b")
+def test_settings_ignore_unrelated_dotenv_entries(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("ENVIRONMENT=production\nUNRELATED_SETTING=unrelated\n")
+
+    loaded = Settings(_env_file=env_file)
+
+    assert loaded.ENVIRONMENT == "production"
 
 
 def _fake_run(monkeypatch):
     async def fake_run_task(prompt, bus, **kw):
         return None
+
     monkeypatch.setattr(tasks, "run_task", fake_run_task)
 
 
@@ -36,30 +40,15 @@ def test_local_accepts_ollama_provider(monkeypatch):
     assert resp.task_id
 
 
-def test_missing_token_returns_401(enable_auth):
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(tasks.create_task(TaskRequest(prompt="hi", provider="groq", groq_api_key="k", groq_model="m")))
-    assert exc.value.status_code == 401
-
-
-def test_valid_bearer_token_passes(enable_auth, monkeypatch):
+def test_groq_task_does_not_require_authentication(monkeypatch):
     _fake_run(monkeypatch)
-    resp = asyncio.run(tasks.create_task(
-        TaskRequest(prompt="hi", provider="groq", groq_api_key="k", groq_model="m"),
-        authorization="Bearer tok-a",
-    ))
+    resp = asyncio.run(tasks.create_task(TaskRequest(
+        prompt="hi",
+        provider="groq",
+        groq_api_key="k",
+        groq_model="m",
+    )))
     assert resp.task_id
-
-
-def test_production_without_tokens_fails_closed(enable_auth, monkeypatch):
-    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
-    monkeypatch.setattr(settings, "DEMO_TOKENS", "")
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(tasks.create_task(
-            TaskRequest(prompt="hi", provider="groq", groq_api_key="k", groq_model="m"),
-            authorization="Bearer anything",
-        ))
-    assert exc.value.status_code == 401
 
 
 def test_llm_service_refuses_ollama_fallback_in_production(monkeypatch):
