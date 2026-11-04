@@ -130,14 +130,32 @@ class DockerExecutionService:
             # Run as nobody:nogroup with a writable tmpfs at /tmp and
             # /output; the venv lives on tmpfs because the bind-free
             # injected /app tree is root-owned and read-only to us.
+            # Generated code may write artifacts anywhere (relative paths
+            # resolve against WORKDIR /), so after it finishes we sweep any
+            # new files/dirs outside of system paths into /output, which is
+            # the single directory streamed back to the frontend.
+            sweep = (
+                "find / -xdev -mindepth 1 -maxdepth 1 \\\n"
+                "  ! -name app ! -name output ! -name tmp ! -name proc ! -name sys ! -name dev ! -name etc \\\n"
+                "  ! -name usr ! -name var ! -name lib ! -name lib64 ! -name bin ! -name sbin \\\n"
+                "  ! -name opt ! -name root ! -name home ! -name media ! -name mnt ! -name run \\\n"
+                "  ! -name srv ! -name boot ! -name lost+found ! -name .dockerenv \\\n"
+                "  -exec mv -t /output/ {} + 2>/dev/null || true\n"
+            )
             run_script = (
                 "#!/bin/bash\n"
                 "set -e\n"
                 "export HOME=/tmp\n"
                 "export PIP_CACHE_DIR=/tmp/pip-cache\n"
+                "mkdir -p /output\n"
+                # Sweep stray files out of / before running user code so the
+                # image's original root layout is restored afterwards too.
+                f"{sweep}"
                 "python -m venv /tmp/.venv\n"
                 "source /tmp/.venv/bin/activate\n"
-                f"{pip_line}python -u /app/main.py"
+                f"{pip_line}python -u /app/main.py\n"
+                # Collect any artifacts written outside /output into /output.
+                f"{sweep}"
             )
             run_bytes = run_script.encode('utf-8')
             info = tarfile.TarInfo(name='app/run.sh')
