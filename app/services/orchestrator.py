@@ -9,7 +9,7 @@ from .code_validation import ValidationAgent
 from .docker_service import DockerExecutionService
 from .event_bus import EventBus
 from .session_memory import append_message, get_messages
-from ..routers.tasks import save_task_files
+from .artifact_store import save_task_files
 
 logger = logging.getLogger(__name__)
 

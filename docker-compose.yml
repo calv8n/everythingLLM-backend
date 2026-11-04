@@ -43,7 +43,7 @@ services:
       # Security List must allow TCP ingress on 8080 (it does by default
       # for VNC; verify in the OCI console under Networking -> VCN ->
       # Security Lists -> Ingress Rules).
-      - "8080:80"
+      - "8080:8080"   # host 8080 -> container 8080 (Caddy listens on :8080)
       - "80:80"
       - "443:443"
     volumes:
