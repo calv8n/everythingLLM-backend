@@ -41,6 +41,13 @@
         reverse_proxy backend:8000
     }
 
+    # Task artifacts (CSVs, Plotly HTML charts) are served by the backend at
+    # /api/task/{id}/files[/name]; the /api/* handler above already proxies
+    # them. They can also be embedded directly in a sandboxed <iframe>:
+    #   <iframe src="http://129.225.68.122:8080/api/task/<id>/files/chart.html?inline=true">
+    # The backend sets Content-Security-Policy: sandbox allow-scripts so the
+    # generated chart JS runs in an isolated browsing context.
+
     # Serve the frontend build here if you host it on the same VM:
     # root * /srv/frontend
     # try_files {path} /index.html

@@ -1,8 +1,13 @@
 import asyncio
+import base64
 import logging
+import mimetypes
+import re
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Header, HTTPException
+from fastapi.responses import Response
 
 from ...config import settings
 from ...models import TaskRequest, TaskResponse
@@ -12,6 +17,89 @@ from ..services.orchestrator import run_task
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Artifact store: files produced by sandbox executions are persisted on the
+# host (outside the API container) so they survive container removal and can
+# be downloaded or previewed via REST after the WebSocket 'result' event.
+ARTIFACT_ROOT = Path(settings.ARTIFACT_DIR)
+_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _artifact_dir(task_id: str) -> Path:
+    return ARTIFACT_ROOT / task_id
+
+
+def save_task_files(task_id: str, files: list[dict]) -> None:
+    """Persist decoded output files for later download/preview."""
+    target = _artifact_dir(task_id)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        for entry in files:
+            name = _SAFE_NAME_RE.sub("_", Path(entry.get("name", "")).name) or "file"
+            data = base64.b64decode(entry.get("data", ""))
+            (target / name).write_bytes(data)
+        logger.info(
+            "Task artifacts saved task_id=%s file_count=%d dir=%s",
+            task_id, len(files), target,
+        )
+    except OSError:
+        logger.exception("Failed to persist task artifacts task_id=%s", task_id)
+
+
+def list_task_files(task_id: str) -> list[dict]:
+    target = _artifact_dir(task_id)
+    if not target.is_dir():
+        return []
+    result = []
+    for path in sorted(target.iterdir()):
+        if path.is_file():
+            result.append({
+                "name": path.name,
+                "url": f"/api/task/{task_id}/files/{path.name}",
+                "size": path.stat().st_size,
+            })
+    return result
+
+
+@router.get("/api/task/{task_id}/files")
+async def task_file_index(
+    task_id: str,
+    authorization: str | None = Header(default=None),
+):
+    """List downloadable artifacts produced by a completed task."""
+    require_http_auth(authorization)
+    return {"task_id": task_id, "files": list_task_files(task_id)}
+
+
+@router.get("/api/task/{task_id}/files/{file_name}")
+async def download_task_file(
+    task_id: str,
+    file_name: str,
+    inline: bool = False,
+    authorization: str | None = Header(default=None),
+):
+    """Download one artifact. Use ?inline=true to render Plotly HTML/csv in
+    the browser (served with a safe Content-Type and no-store)."""
+    require_http_auth(authorization)
+    safe_name = _SAFE_NAME_RE.sub("_", Path(file_name).name)
+    path = _artifact_dir(task_id) / safe_name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    content = path.read_bytes()
+    media_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    disposition = "inline" if inline else "attachment"
+    headers = {
+        "Content-Disposition": f'{disposition}; filename="{safe_name}"',
+        # Interactive Plotly pages are embedded in a *sandboxed* iframe by the
+        # frontend; allow that while keeping everything else locked down.
+        "Content-Security-Policy": (
+            "sandbox allow-scripts; frame-ancestors 'self'"
+        ),
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "no-store",
+    }
+    return Response(content=content, media_type=media_type, headers=headers)
+
 
 @router.post("/api/task", response_model=TaskResponse)
 async def create_task(

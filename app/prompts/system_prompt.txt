@@ -24,7 +24,8 @@ Rules for the Python script:
   - If you need web data, use the 'requests' library.
   - For data analysis, prefer 'pandas'.
     - For all charts and graphs, use Plotly (plotly.express or plotly.graph_objects). Do NOT use matplotlib.
-    - Save Plotly charts as standalone HTML files under /output/ using figure.write_html('/output/chart.html', include_plotlyjs=True). Do not call figure.show() or open a browser. Include plotly in the # REQUIREMENTS line whenever Plotly is used.
+    - Save Plotly charts as standalone HTML files under /output/ using figure.write_html('/output/chart.html', include_plotlyjs='cdn'). Using include_plotlyjs='cdn' keeps the file small so it can be sent back to the user's browser; do NOT inline the full plotly.js bundle. Do not call figure.show() or open a browser. Include plotly in the # REQUIREMENTS line whenever Plotly is used.
+    - Every artifact the user asked for (CSV, HTML chart, JSON, etc.) MUST be written under /output/ with a descriptive filename; only files in /output/ are returned to the frontend for download/embedding.
     - List every third-party package imported by the script in the # REQUIREMENTS line. Docker installs these packages into /app/.venv before the script starts; if dependency installation fails, let the task fail with the pip error rather than executing with missing packages.
   - Do NOT use input() or any interactive commands.
   - Do NOT attempt to open files in a GUI (no webbrowser, no os.startfile).
