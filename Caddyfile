@@ -7,15 +7,15 @@
 # The VM is currently reachable at http://129.225.68.122:8080 (Oracle Cloud
 # security lists usually leave 8080 open for VNC-style traffic, so this port
 # is used instead of 80). Change the site address here AND in
-# docker-compose.yml ("8080:80") if you move to a domain/HTTPS later.
+# docker-compose.yml ("8080:8080") if you move to a domain/HTTPS later.
 
 # IMPORTANT: the site address is Caddy's INTERNAL address, which must match
-# the container port exposed in docker-compose.yml ("8080:80" => container
-# port 80). The host machine still sees the site at http://<VM_IP>:8080.
-# If you change this to :8080, also change the compose mapping to "8080:8080",
+# the container port exposed in docker-compose.yml ("8080:8080" =>
+# container port 8080). The host machine still sees the site at http://<VM_IP>:8080.
+# Keep this in sync with the compose mapping ("8080:8080").
 # otherwise Caddy listens on a port that is never published and every request
 # is reset ("Recv failure: Connection reset by peer").
-:80 {
+:8080 {
     # Demo guard (OPTIONAL — commented out by default so anyone can reach the
     # API). To restrict access to your own machines only, uncomment the block
     # below and replace <YOUR_HOME_IP> with your real public IP (find it at
