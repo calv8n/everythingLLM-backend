@@ -1,0 +1,59 @@
+# Caddy reverse proxy for the AI Task Runner demo.
+# Replace with your Oracle Cloud public IP or a DNS name you own.
+# Let's Encrypt certificates are issued automatically when using a DNS name;
+# with a bare IP, Caddy cannot get a cert and will serve plain HTTP — in that
+# case put an OCI load balancer / self-signed setup in front, or use DuckDNS.
+#
+# The VM is currently reachable at http://129.225.68.122:8080 (Oracle Cloud
+# security lists usually leave 8080 open for VNC-style traffic, so this port
+# is used instead of 80). Change the site address here AND in
+# docker-compose.yml ("8080:8080") if you move to a domain/HTTPS later.
+
+# IMPORTANT: the site address is Caddy's INTERNAL address, which must match
+# the container port exposed in docker-compose.yml ("8080:8080" =>
+# container port 8080). The host machine still sees the site at http://<VM_IP>:8080.
+# Keep this in sync with the compose mapping ("8080:8080").
+# otherwise Caddy listens on a port that is never published and every request
+# is reset ("Recv failure: Connection reset by peer").
+:8080 {
+    # Demo guard (OPTIONAL — commented out by default so anyone can reach the
+    # API). To restrict access to your own machines only, uncomment the block
+    # below and replace <YOUR_HOME_IP> with your real public IP (find it at
+    # https://ifconfig.me). WARNING: if left uncommented without editing the
+    # IP, every real client gets HTTP 403.
+    # NOTE: remote_ip accepts ONLY IP addresses or CIDR ranges (e.g. 1.2.3.4
+    # or 1.2.3.0/24). Hostnames like host.docker.internal are invalid there
+    # and will crash Caddy on startup.
+    #@limited {
+    #    not remote_ip <YOUR_HOME_IP>
+    #}
+    #respond @limited "Forbidden" 403
+
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
+
+    handle /ws/* {
+        reverse_proxy backend:8000
+    }
+
+    handle /healthz {
+        reverse_proxy backend:8000
+    }
+
+    # Task artifacts (CSVs, Plotly HTML charts) are served by the backend at
+    # /api/task/{id}/files[/name]; the /api/* handler above already proxies
+    # them. They can also be embedded directly in a sandboxed <iframe>:
+    #   <iframe src="http://129.225.68.122:8080/api/task/<id>/files/chart.html?inline=true">
+    # The backend sets Content-Security-Policy: sandbox allow-scripts so the
+    # generated chart JS runs in an isolated browsing context.
+
+    # Serve the frontend build here if you host it on the same VM:
+    # root * /srv/frontend
+    # try_files {path} /index.html
+    # file_server
+
+    log {
+        output file /data/access.log
+    }
+}

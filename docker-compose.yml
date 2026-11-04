@@ -1,0 +1,57 @@
+services:
+  backend:
+    build: .
+    image: ai-task-runner-backend:latest
+    container_name: ai-task-runner
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      # ENVIRONMENT=production => Groq-only LLM access (no Ollama), auth fails
+      # closed unless DEMO_TOKENS is set in .env.production.
+      - ENVIRONMENT=production
+      - PYTHONPATH=/app
+    ports:
+      - "127.0.0.1:8000:8000"   # only Caddy/nginx reaches the app publicly
+    volumes:
+      # The app needs the host Docker daemon to run sandboxed code.
+      # Rootless Docker is NOT supported by this mount; use the system socket.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persisted task output files (CSVs, Plotly HTML charts) served by
+      # GET /api/task/{id}/files — kept on a named volume so artifacts
+      # survive rebuilds and container removal.
+      - backend-artifacts:/tmp/backend-artifacts
+    # Join the host "docker" group so the in-container user can use the socket.
+    group_add:
+      - "${DOCKER_GID:-999}"
+    mem_limit: 1200m             # fits comfortably in Always Free 4 GB ARM
+    cpus: "1.5"                  # must be <= available CPUs (VM has 2; keep < 2.0 so Docker accepts it)
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2
+    container_name: ai-task-runner-caddy
+    restart: unless-stopped
+    ports:
+      # OCI exposes this VM publicly on http://129.225.68.122:8080 — the
+      # Security List must allow TCP ingress on 8080 (it does by default
+      # for VNC; verify in the OCI console under Networking -> VCN ->
+      # Security Lists -> Ingress Rules).
+      - "8080:8080"   # host 8080 -> container 8080 (Caddy listens on :8080)
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
+  backend-artifacts:
