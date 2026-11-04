@@ -1,12 +1,11 @@
 import logging
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .app.routers import tasks
 from .config import settings
 from .app.routers import websockets
-from .app.security import require_http_auth
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -20,12 +19,11 @@ async def healthz():
 
 
 @app.get("/api/config")
-async def client_config(authorization: str | None = Header(default=None)):
+async def client_config():
     """ Tells the frontend which LLM providers are available in this
     deployment. Locally users may pick Ollama or Groq; in production
     (Oracle Cloud Always Free) only Groq with the user's own API key is
     offered, so the frontend can hide the Ollama option automatically."""
-    require_http_auth(authorization)
     return {
         "providers": [] if settings.is_production else ["ollama", "groq"],
         "default_provider": "groq" if settings.is_production else "ollama",

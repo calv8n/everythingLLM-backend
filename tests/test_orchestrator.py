@@ -12,6 +12,7 @@ def run_task_with_fakes(
     retry_attempts=2,
     session_id=None,
     prompt="Make a population table",
+    follow_up_result=True,
 ):
     prompts = []
     executed_code = []
@@ -55,9 +56,14 @@ def run_task_with_fakes(
         assert sandbox._docker_service.initialized
         return await fake_generate_plan_and_code(prompt, bus, groq_api_key=groq_api_key)
 
+    async def fake_classify_follow_up(prompt, previous_messages, bus, **kwargs):
+        assert previous_messages
+        return follow_up_result
+
     monkeypatch.setattr(orchestrator, "implement_task", fake_implement_task)
     monkeypatch.setattr(orchestrator, "prepare_task_prompt", fake_prepare_task_prompt)
     monkeypatch.setattr(orchestrator, "DockerExecutionService", FakeDockerExecutionService)
+    monkeypatch.setattr(orchestrator, "classify_follow_up", fake_classify_follow_up)
     monkeypatch.setattr(orchestrator.settings, "CODE_RETRY_ATTEMPTS", retry_attempts)
 
     async def scenario():
@@ -310,4 +316,41 @@ def test_follow_up_generation_receives_previous_session_context(monkeypatch):
     assert "print('first version')" in follow_up_prompts[0]
     assert "First result" in follow_up_prompts[0]
     assert "Add a totals row" in follow_up_prompts[0].split("New user request:")[-1]
+    clear_session(session_id)
+
+
+def test_unrelated_request_does_not_receive_previous_session_context(monkeypatch):
+    session_id = "independent-request-test-session"
+    clear_session(session_id)
+    run_task_with_fakes(
+        monkeypatch,
+        generations=[("Plan", "print('old task code')", [])],
+        execution_results=[
+            {"exit_code": 0, "stdout": "old task result", "files": []},
+        ],
+        session_id=session_id,
+        prompt="Make a population table",
+    )
+
+    events, prompts, executed_code = run_task_with_fakes(
+        monkeypatch,
+        generations=[
+            ("First plan", "print(items[0])", []),
+            ("Repaired plan", "print('photosynthesis')", []),
+        ],
+        execution_results=[
+            {"exit_code": 1, "stdout": "IndexError: list index out of range", "files": []},
+            {"exit_code": 0, "stdout": "Photosynthesis explained", "files": []},
+        ],
+        retry_attempts=1,
+        session_id=session_id,
+        prompt="Explain photosynthesis",
+        follow_up_result=False,
+    )
+
+    assert events[-1]["type"] == "result"
+    assert executed_code == ["print(items[0])", "print('photosynthesis')"]
+    assert all("population table" not in prompt.lower() for prompt in prompts)
+    assert all("old task code" not in prompt for prompt in prompts)
+    assert all("old task result" not in prompt for prompt in prompts)
     clear_session(session_id)

@@ -15,6 +15,12 @@ def test_execution_archive_contains_app_directory_and_files():
         members = {member.name: member for member in archive.getmembers()}
         assert "app" in members
         assert members["app"].isdir()
+        assert "venv" in members
+        assert members["venv"].isdir()
+        assert members["venv"].mode & 0o777 == 0o777
+        assert "output" in members
+        assert members["output"].isdir()
+        assert members["output"].mode & 0o777 == 0o777
         assert "app/main.py" in members
         assert "app/run.sh" in members
 
@@ -24,8 +30,10 @@ def test_execution_archive_contains_app_directory_and_files():
         assert run_file is not None
         assert code_file.read() == b"print('hello')"
         run_script = run_file.read()
-        assert b"python -m venv /app/.venv" in run_script
-        assert b"source /app/.venv/bin/activate" in run_script
+        assert b"python -m venv /venv" in run_script
+        assert b"source /venv/bin/activate" in run_script
+        assert b"export PIP_NO_CACHE_DIR=1" in run_script
+        assert b"PIP_CACHE_DIR=/tmp/pip-cache" not in run_script
         assert b"python -m pip install --quiet" in run_script
         assert b"python -u /app/main.py" in run_script
         assert run_script.index(b"python -m pip install") < run_script.index(b"python -u /app/main.py")
@@ -98,4 +106,16 @@ def test_html_output_file_is_serialized_for_frontend_preview():
         "type": "text/html",
         "encoding": "base64",
         "data": base64.b64encode(html_content).decode("ascii"),
+        "size": len(html_content),
     }]
+
+
+def test_execution_archive_creates_writable_persistent_output_directory():
+    service = DockerExecutionService.__new__(DockerExecutionService)
+
+    archive_bytes = service._create_tar_achives("print('hello')", [])
+
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r") as archive:
+        output_dir = archive.getmember("output")
+        assert output_dir.isdir()
+        assert output_dir.mode & 0o777 == 0o777
