@@ -59,6 +59,29 @@ def test_ollama_task_does_not_use_server_groq_credentials(monkeypatch):
     assert captured["groq_model"] is None
 
 
+def test_create_task_passes_web_search_options(monkeypatch):
+    captured = {}
+
+    async def fake_run_task(prompt, bus, *, groq_api_key=None, groq_model=None, session_id=None, task_id=None, web_search=False, search_provider=None):
+        captured.update(
+            prompt=prompt,
+            web_search=web_search,
+            search_provider=search_provider,
+        )
+
+    monkeypatch.setattr(tasks, "run_task", fake_run_task)
+
+    async def scenario():
+        await tasks.create_task(TaskRequest(prompt="search prompt", web_search=True, search_provider="duckduckgo"))
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+
+    assert captured["prompt"] == "search prompt"
+    assert captured["web_search"] is True
+    assert captured["search_provider"] == "duckduckgo"
+
+
 def test_groq_task_requires_key_and_model():
     async def scenario():
         return await tasks.create_task(
@@ -71,3 +94,40 @@ def test_groq_task_requires_key_and_model():
         assert getattr(error, "status_code", None) == 422
     else:
         raise AssertionError("Groq requests without a model must be rejected")
+
+
+def test_create_task_rejects_oversized_prompt_before_scheduling(monkeypatch):
+    monkeypatch.setattr(
+        tasks,
+        "run_task",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("task must not start")),
+    )
+
+    async def scenario():
+        return await tasks.create_task(TaskRequest(prompt="x" * 4_001))
+
+    try:
+        asyncio.run(scenario())
+    except Exception as error:
+        assert getattr(error, "status_code", None) == 422
+        assert "4000-character limit" in error.detail
+    else:
+        raise AssertionError("Oversized task prompts must be rejected")
+
+
+def test_create_task_blocks_disallowed_request_before_scheduling(monkeypatch):
+    monkeypatch.setattr(
+        tasks,
+        "run_task",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("task must not start")),
+    )
+
+    async def scenario():
+        return await tasks.create_task(TaskRequest(prompt="Build a ransomware payload"))
+
+    try:
+        asyncio.run(scenario())
+    except Exception as error:
+        assert getattr(error, "status_code", None) == 422
+    else:
+        raise AssertionError("Disallowed requests must be rejected")

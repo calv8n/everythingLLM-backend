@@ -10,6 +10,7 @@ from ...config import settings
 from ...models import TaskRequest, TaskResponse
 from ..services.artifact_store import get_artifact_path, list_task_files
 from ..services.event_bus import create_bus
+from ..services.input_guard import MAX_PROMPT_CHARS, validate_prompt
 from ..services.orchestrator import run_task
 
 router = APIRouter()
@@ -57,6 +58,14 @@ async def create_task(
     request: TaskRequest,
 ):
     """Endpoint to create a new task based on the user prompt."""
+    if validate_prompt(request.prompt) == "block":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"The request exceeds the {MAX_PROMPT_CHARS}-character limit or "
+                "matches a disallowed activity."
+            ),
+        )
     # Production (cloud demo): Ollama is not available on the server, so only
     # the Groq provider is accepted. Locally users may choose either provider.
     if settings.is_production and request.provider == "ollama":
@@ -68,6 +77,11 @@ async def create_task(
         raise HTTPException(status_code=422, detail="A Groq API key is required when Groq is selected.")
     if request.provider == "groq" and not (request.groq_model or "").strip():
         raise HTTPException(status_code=422, detail="A Groq model is required when Groq is selected.")
+    if request.web_search and request.search_provider not in {None, "searxng", "duckduckgo", "tavily"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Unsupported search provider. Use one of: searxng, duckduckgo, tavily.",
+        )
 
     task_id = str(uuid.uuid4())
     session_id = request.session_id or str(uuid.uuid4())
@@ -81,16 +95,16 @@ async def create_task(
     )
 
     # Start the task in the background
-    asyncio.create_task(
-        run_task(
-            request.prompt,
-            bus,
-            groq_api_key=request.groq_api_key if request.provider == "groq" else None,
-            groq_model=request.groq_model if request.provider == "groq" else None,
-            session_id=session_id,
-            task_id=task_id,
-        )
-    )
+    task_kwargs = {
+        "groq_api_key": request.groq_api_key if request.provider == "groq" else None,
+        "groq_model": request.groq_model if request.provider == "groq" else None,
+        "session_id": session_id,
+        "task_id": task_id,
+    }
+    if request.web_search or request.search_provider:
+        task_kwargs["web_search"] = request.web_search
+        task_kwargs["search_provider"] = request.search_provider
+
+    asyncio.create_task(run_task(request.prompt, bus, **task_kwargs))
 
     return TaskResponse(task_id=task_id, session_id=session_id)
-

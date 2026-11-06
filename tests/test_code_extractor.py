@@ -103,7 +103,10 @@ The script uses pandas and numpy.
 
 
 def test_ollama_generates_output(monkeypatch):
-    def fake_stream_ollama(user_prompt):
+    captured = {}
+
+    def fake_stream_ollama(user_prompt, system_prompt=None):
+        captured["system_prompt"] = system_prompt
         return [
             {"message": {"content": "Here is the plan.\n"}},
             {
@@ -125,18 +128,21 @@ def test_ollama_generates_output(monkeypatch):
     async def run_check():
         bus = FakeBus()
         response, code, reqs = await llm_service.generate_plan_and_code(
-            "Create a simple pandas script", bus
+            "Create a simple pandas script", bus, allowed_outputs=["chart"]
         )
         assert "plan" in response.lower()
         assert "print" in code
         assert reqs == ["pandas"]
         assert any(item["type"] == "code" for item in bus.messages)
+        assert "Deliverables allowed for THIS task: chart" in captured["system_prompt"]
+        assert "{ALLOWED_OUTPUTS}" not in captured["system_prompt"]
+        assert "{TIMEOUT_MINUTES}" not in captured["system_prompt"]
 
     asyncio.run(run_check())
 
 
 def test_ollama_generates_no_output(monkeypatch):
-    def fake_stream_ollama(user_prompt):
+    def fake_stream_ollama(user_prompt, system_prompt=None):
         return []
 
     monkeypatch.setattr(llm_service, "_stream_ollama", fake_stream_ollama)

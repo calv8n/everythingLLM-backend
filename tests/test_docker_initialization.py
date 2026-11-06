@@ -38,7 +38,7 @@ class FakeDockerClient:
 def make_service(image_exists: bool) -> tuple[DockerExecutionService, FakeDockerClient]:
     service = DockerExecutionService.__new__(DockerExecutionService)
     client = FakeDockerClient(image_exists)
-    service.client = client
+    service._client = client
     service._docker_errors = SimpleNamespace(ImageNotFound=FakeImageNotFound)
     service.image = "python:3.11-slim"
     service._initialized = False

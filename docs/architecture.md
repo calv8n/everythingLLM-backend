@@ -29,26 +29,26 @@ flowchart LR
 
 ### Frontend
 
-The Vite React/TypeScript app provides a chat shell with a persistent scrollable conversation, dark/light themes, Ollama/Groq provider selector, Groq key/model fields, and a bottom composer. Each agent response includes Planning, Code, Executing, and Result tabs. The frontend submits a task over HTTP, then consumes events over a task-specific WebSocket. Results support Markdown, CSV tables, inline images, downloads, and HTML graphs in a sandboxed iframe.
+The Vite React/TypeScript app provides a chat shell with a persistent scrollable conversation, dark/light themes, Ollama/Groq provider selector, Groq key/model fields, and a bottom composer. The composer also includes an optional web-search toggle and provider selector. Each agent response includes Planning, Code, Executing, and Result tabs. The frontend submits a task over HTTP, then consumes events over a task-specific WebSocket. Search-related events stream `search_query` and `search_results` text into the planning panel so users can follow the live research flow. Results support Markdown, CSV tables, inline images, downloads, and HTML graphs in a sandboxed iframe.
 
 ### Backend API and event stream
 
-- `POST /api/task` accepts `prompt`, `provider`, optional `groq_api_key`, optional `groq_model`, and optional `session_id`. Groq selection requires both key and model; invalid requests receive HTTP 422.
+- `POST /api/task` accepts `prompt`, `provider`, optional `groq_api_key`, optional `groq_model`, optional `session_id`, optional `web_search` toggle, and optional `search_provider` (`searxng`, `duckduckgo`, or `tavily`). Groq selection requires both key and model; invalid requests receive HTTP 422.
 - The endpoint creates a task UUID and event bus, schedules the orchestrator, and returns `task_id` plus `session_id`.
 - `WS /ws/{task_id}` consumes the event bus and sends each event as JSON. Bus completion ends the WebSocket stream.
-- Event types include `planning`, `code`, `executing`, `log`, `retry`, `result`, and `error`.
+- Event types include `planning`, `code`, `executing`, `log`, `retry`, `result`, `error`, `search_query`, `search_results`, and `page_fetched`.
 - Artifact entries contain `name`, MIME `type`, `encoding: "base64"`, and base64 `data`.
 
 ### Agent pipeline
 
 1. **Docker initialization:** Before model work, the backend pings Docker and ensures `DOCKER_IMAGE` is present, pulling it if absent.
 2. **Planning Agent:** Creates task steps and decides whether current or specialized information requires web lookup. It can access only the restricted sandbox tool, not the host Docker client or filesystem.
-3. **Research Agent:** Performs bounded public web searches only when requested by planning. Retrieved page content is untrusted reference material.
-4. **Implementation Agent:** Uses the selected Ollama or Groq provider to create a complete Python script and requirements declaration.
-5. **Validation Agent:** Parses/compiles Python before execution, discovers third-party imports and adds corresponding pip dependencies, and checks stdout for common explicit failure messages before accepting an exit-code-zero result.
+3. **Research Agent:** Performs bounded public web searches only when the user opts into the feature or the model explicitly requests it. The fallback chain is `searxng` → `duckduckgo` → `tavily` (when configured), and fetched page text is treated as untrusted reference material.
+4. **Implementation Agent:** Uses the selected Ollama or Groq provider to create a complete Python script with `# REQUIREMENTS`, `# OUTPUTS`, and `[[RESULT]]` declarations. Deliverables default to text; requested outputs are detected from the user request.
+5. **Validation Agent:** Checks the script contract, syntax, requirements, and AST guardrails before execution; discovers third-party imports and adds corresponding pip dependencies; then checks stdout for common explicit failure messages before accepting an exit-code-zero result.
 6. **Execution:** `AgentSandbox` runs the validated script in a fresh Docker container.
 7. **Repair loop:** Syntax failures, execution exceptions, timeouts, nonzero exits, and recognized printed failure output are sent to the model with the failed code and logs. Each repair prompt also includes the previous six retained session messages. Up to `CODE_RETRY_ATTEMPTS` repairs are made after initial generation.
-8. **Result:** Only a successful validated execution is published as `result`. Otherwise, a final `error` event is emitted.
+8. **Result:** Only a successful validated execution is published as `result`. The result text is extracted from the script's `[[RESULT]]` block (with a bounded stdout-tail fallback); raw container logs stay in the Executing stage. An artifact gate drops unrequested or oversized files before they are stored or returned.
 
 ## Task data flow
 
@@ -87,7 +87,7 @@ The event bus buffers early events, so the task may publish before the browser f
 
 ## Docker execution and artifacts
 
-Each execution uses the configured `python:3.11-slim` image by default. The backend creates a disposable container with configured memory and CPU limits, injects an in-memory archive containing `/app/main.py` and `/app/run.sh`, and does not mount host directories. The runner:
+Each execution uses the configured `python:3.11-slim` image by default. The backend creates a disposable container with configured memory and CPU limits, an empty explicit environment, injects an in-memory archive containing `/app/main.py`, `/app/helpers.py`, and `/app/run.sh`, and does not mount host directories. The runner:
 
 1. Creates `/app/.venv` and activates it.
 2. Installs declared and statically discovered third-party dependencies with pip.
@@ -95,7 +95,7 @@ Each execution uses the configured `python:3.11-slim` image by default. The back
 4. Produces generated files under `/output/`.
 5. Streams logs, waits for completion, collects files, then force-removes the container in cleanup.
 
-Execution has a configurable timeout. Docker containers have network connectivity for pip and public API requests. This is isolation, not a guarantee that generated code is trustworthy: inspect code, avoid supplying secrets in prompts, and use appropriate host Docker security controls. Dynamic imports may not be discovered by static validation and should be listed in `# REQUIREMENTS`.
+Execution has a configurable timeout. Docker containers have network connectivity for pip and task-specific public API requests unless network is disabled. The bundled HTTP helpers enforce HTTPS, reject non-public DNS results, recheck redirects, apply timeouts, and cap response size; generated code is instructed to use these helpers, and direct HTTP clients are rejected by the static guard. Static checks are bypassable and network access is not fully isolated: inspect generated code, avoid supplying secrets in prompts, and apply appropriate host Docker controls. Containers receive no host environment variables. Stdout is capped and common credential formats are redacted; artifacts are capped at five files and 5 MB per file. Dynamic imports may not be discovered by static validation and should be listed in `# REQUIREMENTS`.
 
 Charts should use Plotly and be saved as standalone HTML under `/output/`. The Docker service returns artifacts as MIME-typed base64 payloads; the frontend previews HTML in a sandboxed iframe, images as data URLs, and CSV as a table.
 

@@ -22,13 +22,17 @@ def test_execution_archive_contains_app_directory_and_files():
         assert members["output"].isdir()
         assert members["output"].mode & 0o777 == 0o777
         assert "app/main.py" in members
+        assert "app/helpers.py" in members
         assert "app/run.sh" in members
 
         code_file = archive.extractfile("app/main.py")
+        helpers_file = archive.extractfile("app/helpers.py")
         run_file = archive.extractfile("app/run.sh")
         assert code_file is not None
+        assert helpers_file is not None
         assert run_file is not None
         assert code_file.read() == b"print('hello')"
+        assert b"def get_json" in helpers_file.read()
         run_script = run_file.read()
         assert b"python -m venv /venv" in run_script
         assert b"source /venv/bin/activate" in run_script
@@ -42,14 +46,12 @@ def test_execution_archive_contains_app_directory_and_files():
 
 def test_dependency_names_are_shell_escaped_in_run_script():
     service = DockerExecutionService.__new__(DockerExecutionService)
-    archive_bytes = service._create_tar_achives("print('safe')", ["requests; touch /tmp/unwanted"])
-
-    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r") as archive:
-        run_file = archive.extractfile("app/run.sh")
-        assert run_file is not None
-        run_script = run_file.read()
-
-    assert b"'requests; touch /tmp/unwanted'" in run_script
+    try:
+        service._create_tar_achives("print('safe')", ["requests; touch /tmp/unwanted"])
+    except ValueError as error:
+        assert "plain PyPI package names" in str(error)
+    else:
+        raise AssertionError("Unsafe package requirements must be rejected before container creation")
 
 
 def test_plotly_is_installed_before_execution_when_requirement_is_omitted():
@@ -67,18 +69,20 @@ def test_plotly_is_installed_before_execution_when_requirement_is_omitted():
     assert run_script.index(b"pip install") < run_script.index(b"python -u /app/main.py")
 
 
-def test_requests_is_installed_before_execution_when_requirement_is_omitted():
+def test_http_helpers_are_bundled_without_extra_dependencies():
     service = DockerExecutionService.__new__(DockerExecutionService)
     service.task_id = "test-task"
-    archive_bytes = service._create_tar_achives("import requests\nprint('ok')", [])
+    archive_bytes = service._create_tar_achives("from helpers import get_json\nprint('ok')", [])
 
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r") as archive:
         run_file = archive.extractfile("app/run.sh")
+        helpers_file = archive.extractfile("app/helpers.py")
         assert run_file is not None
+        assert helpers_file is not None
         run_script = run_file.read()
 
-    assert b"pip install --quiet --disable-pip-version-check requests" in run_script
-    assert run_script.index(b"pip install") < run_script.index(b"python -u /app/main.py")
+    assert b"def get_json" in helpers_file.read()
+    assert b"pip install" not in run_script
 
 
 def test_html_output_file_is_serialized_for_frontend_preview():
@@ -119,3 +123,20 @@ def test_execution_archive_creates_writable_persistent_output_directory():
         output_dir = archive.getmember("output")
         assert output_dir.isdir()
         assert output_dir.mode & 0o777 == 0o777
+
+
+def test_container_does_not_receive_host_environment():
+    service = DockerExecutionService.__new__(DockerExecutionService)
+    captured = {}
+    service.image = "python:3.11-slim"
+    service.mem_limit = "512m"
+    service.task_id = "test-task"
+    service._client = SimpleNamespace(
+        containers=SimpleNamespace(create=lambda **kwargs: captured.update(kwargs) or kwargs)
+    )
+
+    service._create_container()
+
+    assert captured["environment"] == {}
+    assert captured["cap_drop"] == ["ALL"]
+    assert captured["security_opt"] == ["no-new-privileges:true"]

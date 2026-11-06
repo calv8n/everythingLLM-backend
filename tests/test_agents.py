@@ -57,7 +57,7 @@ def test_orchestrator_agent_runs_research_only_when_planner_requests_it(monkeypa
             '"needs_research": true, "research_queries": ["current example API docs"]}'
         )
 
-    def fake_search_web(query):
+    def fake_search_web(query, provider=None):
         assert query == "current example API docs"
         return [{
             "title": "API documentation",
@@ -71,7 +71,7 @@ def test_orchestrator_agent_runs_research_only_when_planner_requests_it(monkeypa
     async def scenario():
         bus = EventBus()
         prompt = await agents.OrchestratorAgent(FakeSandbox()).prepare_implementation_prompt(
-            "Use the current API", bus
+            "Use the current API", bus, web_search=True
         )
         return prompt
 
