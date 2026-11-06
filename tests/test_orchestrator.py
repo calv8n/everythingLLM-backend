@@ -23,6 +23,8 @@ def run_task_with_fakes(
         prompts.append(prompt)
         response, code, requirements = next(generated)
         if code:
+            requirement_header = ", ".join(requirements) or "none"
+            code = f"# REQUIREMENTS: {requirement_header}\n# OUTPUTS: none\n{code}"
             await bus.publish({"type": "code", "content": code})
         return response, code, requirements
 
@@ -40,21 +42,39 @@ def run_task_with_fakes(
 
         async def execute_code(self, code, requirements, bus):
             assert self.initialized
-            executed_code.append(code)
+            executed_code.append("\n".join(code.splitlines()[2:]))
             result = next(results)
             if isinstance(result, BaseException):
                 raise result
             return result
 
-    async def fake_prepare_task_prompt(prompt, bus, *, groq_api_key=None, groq_model=None, sandbox, task_id=None):
-        assert sandbox is not None
-        assert sandbox._docker_service.initialized
-        return prompt
-
-    async def fake_implement_task(prompt, bus, *, groq_api_key=None, groq_model=None, sandbox, task_id=None):
+    async def fake_implement_task(
+        prompt,
+        bus,
+        *,
+        groq_api_key=None,
+        groq_model=None,
+        sandbox,
+        task_id=None,
+        allowed_outputs=None,
+    ):
         assert sandbox is not None
         assert sandbox._docker_service.initialized
         return await fake_generate_plan_and_code(prompt, bus, groq_api_key=groq_api_key)
+
+    async def fake_prepare_task_prompt(
+        prompt,
+        bus,
+        *,
+        groq_api_key=None,
+        groq_model=None,
+        sandbox,
+        task_id=None,
+        allowed_outputs=None,
+    ):
+        assert sandbox is not None
+        assert sandbox._docker_service.initialized
+        return prompt
 
     async def fake_classify_follow_up(prompt, previous_messages, bus, **kwargs):
         assert previous_messages

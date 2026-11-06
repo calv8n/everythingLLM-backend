@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 
 from ...config import settings
@@ -8,10 +9,15 @@ from .agent_sandbox import AgentSandbox
 from .code_validation import ValidationAgent
 from .docker_service import DockerExecutionService
 from .event_bus import EventBus
+from .input_guard import requires_safety_review, validate_prompt
+from .llm_service import PROMPT_VERSION
+from .output_controls import clean_output, extract_result, gate_artifacts, requested_deliverables
 from .session_memory import append_message, get_messages
 from .artifact_store import save_task_files
 
 logger = logging.getLogger(__name__)
+
+_REFUSAL_PATTERN = re.compile(r"^\s*REFUSED:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 
 
 def _file_links(task_id: str | None, files: list[dict]) -> list[dict]:
@@ -37,6 +43,9 @@ async def prepare_task_prompt(
     groq_model: str | None = None,
     sandbox: AgentSandbox,
     task_id: str | None = None,
+    web_search: bool = False,
+    search_provider: str | None = None,
+    allowed_outputs: list[str] | None = None,
 ) -> str:
     """Run planning/research agents and prepare implementation instructions."""
     started_at = time.monotonic()
@@ -47,6 +56,9 @@ async def prepare_task_prompt(
             bus,
             groq_api_key=groq_api_key,
             groq_model=groq_model,
+            web_search=web_search,
+            search_provider=search_provider,
+            allowed_outputs=allowed_outputs,
         )
     except Exception:
         logger.exception("Planning/research failed task_id=%s", task_id or "unknown")
@@ -68,6 +80,7 @@ async def implement_task(
     groq_model: str | None = None,
     sandbox: AgentSandbox,
     task_id: str | None = None,
+    allowed_outputs: list[str] | None = None,
 ) -> tuple[str, str, list[str]]:
     """Run the implementation agent and return its response, code, requirements."""
     started_at = time.monotonic()
@@ -78,6 +91,7 @@ async def implement_task(
             bus,
             groq_api_key=groq_api_key,
             groq_model=groq_model,
+            allowed_outputs=allowed_outputs,
         )
     except Exception:
         logger.exception("Implementation generation failed task_id=%s", task_id or "unknown")
@@ -196,17 +210,28 @@ async def run_task(
     groq_model: str | None = None,
     session_id: str | None = None,
     task_id: str | None = None,
+    web_search: bool = False,
+    search_provider: str | None = None,
 ):
     """Main pipeline to generate a plan and code based on the user prompt."""
     task_started_at = time.monotonic()
     docker_service: DockerExecutionService | None = None
     try:
         logger.info(
-            "Task pipeline started task_id=%s session_id=%s prompt_chars=%d",
+            "Task pipeline started task_id=%s session_id=%s prompt_chars=%d prompt_version=%s",
             task_id or "unknown",
             session_id or "none",
             len(prompt),
+            PROMPT_VERSION,
         )
+        if validate_prompt(prompt) == "block":
+            await bus.publish({
+                "type": "error",
+                "content": "The request exceeds the prompt limit or matches a disallowed activity.",
+            })
+            return
+        allowed_outputs = requested_deliverables(prompt)
+        safety_review = requires_safety_review(prompt)
         # Initialize Docker before asking any agent to plan or research. This makes
         # a missing daemon/image fail immediately instead of after generation.
         docker_service = DockerExecutionService(task_id=task_id)
@@ -252,13 +277,28 @@ async def run_task(
             append_message(session_id, "user", prompt)
 
         generation_prompt = _build_session_prompt(prompt, previous_messages)
+        if safety_review:
+            generation_prompt = (
+                "SAFETY REVIEW REQUIRED: Assess the request against the safety rules before "
+                "planning. Do not perform suspicious scanning, access private or metadata "
+                "addresses, reveal environment or credential data, or enable harmful activity. "
+                "If disallowed, return REFUSED with a short reason.\n\n"
+                + generation_prompt
+            )
+        prepare_prompt_kwargs = {
+            "groq_api_key": groq_api_key,
+            "groq_model": groq_model,
+            "sandbox": sandbox,
+            "task_id": task_id,
+            "allowed_outputs": allowed_outputs,
+        }
+        if web_search or search_provider:
+            prepare_prompt_kwargs["web_search"] = web_search
+            prepare_prompt_kwargs["search_provider"] = search_provider
         implementation_prompt = await prepare_task_prompt(
             generation_prompt,
             bus,
-            groq_api_key=groq_api_key,
-            groq_model=groq_model,
-            sandbox=sandbox,
-            task_id=task_id,
+            **prepare_prompt_kwargs,
         )
         max_retries = max(0, settings.CODE_RETRY_ATTEMPTS)
         max_attempts = max_retries + 1
@@ -268,6 +308,7 @@ async def run_task(
         failure_code = ""
         failure_exit_code: int | str = "unknown"
         validation_agent = ValidationAgent()
+        repeated_validation_errors: dict[str, int] = {}
 
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
@@ -302,7 +343,19 @@ async def run_task(
                 groq_model=groq_model,
                 sandbox=sandbox,
                 task_id=task_id,
+                allowed_outputs=allowed_outputs,
             )
+
+            refusal = _REFUSAL_PATTERN.search(full_response)
+            if refusal and "```" not in full_response:
+                refusal_message = clean_output(refusal.group(1).strip())
+                await bus.publish({
+                    "type": "error",
+                    "content": f"Request declined by safety policy: {refusal_message}",
+                })
+                if session_id:
+                    append_message(session_id, "assistant", f"Request declined: {refusal_message}")
+                return
 
             if not code:
                 failure_code = ""
@@ -311,6 +364,7 @@ async def run_task(
                     "The model did not return a fenced Python code block. "
                     f"Its response was:\n{full_response}"
                 )
+                failure_output = clean_output(failure_output)
                 logger.warning(
                     "Implementation produced no code task_id=%s attempt=%d response_chars=%d",
                     task_id or "unknown",
@@ -319,21 +373,40 @@ async def run_task(
                 )
             else:
                 failure_code = code
-                validation = validation_agent.validate(code, requirements)
+                validation = validation_agent.validate(
+                    code,
+                    requirements,
+                    require_headers=True,
+                    allowed_outputs=allowed_outputs,
+                )
                 if not validation.valid:
                     failure_exit_code = "validation error"
-                    failure_output = validation.error or "Generated code failed validation."
+                    failure_output = clean_output(
+                        validation.error or "Generated code failed validation."
+                    )
+                    repeated_validation_errors[failure_output] = (
+                        repeated_validation_errors.get(failure_output, 0) + 1
+                    )
                     logger.warning(
                         "Generated code validation failed task_id=%s attempt=%d error=%s",
                         task_id or "unknown",
                         attempt,
                         failure_output,
                     )
+                    if repeated_validation_errors[failure_output] >= 2:
+                        await bus.publish({
+                            "type": "error",
+                            "content": clean_output(
+                                "Generated code repeated the same validation failure; "
+                                f"execution was stopped: {failure_output}"
+                            ),
+                        })
+                        break
                     if attempt < max_attempts:
                         continue
                     await bus.publish({
                         "type": "error",
-                        "content": (
+                        "content": clean_output(
                             f"Generated code failed validation after {max_attempts} attempt(s): "
                             f"{failure_output}"
                         ),
@@ -372,7 +445,7 @@ async def run_task(
                     )
                 except Exception as execution_error:
                     failure_exit_code = type(execution_error).__name__
-                    failure_output = (
+                    failure_output = clean_output(
                         f"Execution raised {failure_exit_code}: {execution_error}"
                     )
                     logger.exception(
@@ -393,16 +466,16 @@ async def run_task(
                         len(result.get("files", [])),
                     )
                     if failure_exit_code == 0:
-                        result_text = result.get("stdout") or "Task completed successfully."
+                        execution_output = clean_output(result.get("stdout") or "")
                         result_files = result.get("files", [])
                         output_validation_error = validation_agent.validate_execution_output(
-                            result.get("stdout") or ""
+                            execution_output
                         )
                         if output_validation_error:
                             failure_exit_code = "output validation error"
                             failure_output = (
                                 f"{output_validation_error}\n"
-                                f"Complete execution output:\n{result.get('stdout') or '[empty]'}"
+                                f"Complete execution output:\n{execution_output or '[empty]'}"
                             )
                             logger.warning(
                                 "Execution output validation failed; scheduling code repair task_id=%s attempt=%d",
@@ -410,12 +483,25 @@ async def run_task(
                                 attempt,
                             )
                         else:
+                            allowed_files, dropped_files = gate_artifacts(
+                                result_files,
+                                allowed_outputs,
+                            )
+                            if dropped_files:
+                                await bus.publish({
+                                    "type": "log",
+                                    "content": clean_output(
+                                        "Skipped unrequested or oversized artifacts: "
+                                        + ", ".join(dropped_files)
+                                    ),
+                                })
                             # Persist artifacts on the host and add REST URLs
                             # so the frontend can download/preview files even
                             # after the sandbox container is removed.
-                            if task_id and result_files:
-                                save_task_files(task_id, result_files)
-                            downloadable_files = _file_links(task_id, result_files)
+                            if task_id and allowed_files:
+                                save_task_files(task_id, allowed_files)
+                            downloadable_files = _file_links(task_id, allowed_files)
+                            result_text = clean_output(extract_result(execution_output))
                             await bus.publish({
                                 "type": "result",
                                 "content": result_text,
@@ -448,7 +534,7 @@ async def run_task(
             await bus.publish(
                 {
                     "type": "error",
-                    "content": (
+                    "content": clean_output(
                         f"Code execution failed after {max_attempts} attempt(s) "
                         f"(last status: {failure_exit_code}). Output: {failure_output}"
                     ),
@@ -483,10 +569,14 @@ async def run_task(
     except Exception as e:
         logger.exception("Task failed unexpectedly task_id=%s session_id=%s", task_id or "unknown", session_id or "none")
         if session_id:
-            append_message(session_id, "assistant", f"The task failed: {e}")
+            append_message(
+                session_id,
+                "assistant",
+                clean_output(f"The task failed: {e}"),
+            )
         await bus.publish({
             "type": "error",
-            "content": f"An unexpected error occurred: {str(e)}"
+            "content": clean_output(f"An unexpected error occurred: {str(e)}")
         })
 
     finally:

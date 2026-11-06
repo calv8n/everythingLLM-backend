@@ -9,6 +9,7 @@ from ..utils.code_extractor import extract_code_and_requirements
 
 logger = logging.getLogger(__name__)
 
+PROMPT_VERSION = "2026-11-06"
 _system_prompt: str | None = None
 
 def _load_system_prompt() -> str:
@@ -161,8 +162,16 @@ async def generate_plan_and_code(
     groq_model: str | None = None,
     system_prompt: str | None = None,
     event_type: str | None = "planning",
+    allowed_outputs: list[str] | None = None,
 ) -> tuple[str, str, list[str]]:
     """Generate a response, extract its first code block, and return requirements."""
+    if system_prompt is None:
+        system_prompt = _load_system_prompt()
+    outputs = ", ".join(allowed_outputs or []) or "none (text only)"
+    system_prompt = system_prompt.replace("{ALLOWED_OUTPUTS}", outputs).replace(
+        "{TIMEOUT_MINUTES}",
+        str(max(1, settings.EXECUTION_TIMEOUT_SECONDS // 60)),
+    )
     full_response = await generate_text(
         user_prompt,
         bus,

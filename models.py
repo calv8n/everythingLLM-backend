@@ -8,6 +8,8 @@ class TaskRequest(BaseModel):
     groq_api_key: str | None = None
     groq_model: str | None = None
     session_id: str | None = None
+    web_search: bool = False
+    search_provider: str | None = None
 
 class TaskResponse(BaseModel):
     task_id: str

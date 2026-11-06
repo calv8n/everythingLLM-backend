@@ -16,14 +16,15 @@ from pathlib import Path
 from ...config import settings
 from .code_validation import ValidationAgent
 from .event_bus import EventBus
+from .output_controls import MAX_ARTIFACT_BYTES, MAX_ARTIFACTS, MAX_STDOUT_CHARS, clean_output
 
 logger = logging.getLogger(__name__)
 
 # Sandbox output limits. Files in /output are streamed back to the frontend,
 # so they must be bounded by size and count; Plotly HTML embeds the ~3-4 MB
 # plotly.js bundle inline, which would otherwise eat the per-file budget.
-MAX_OUTPUT_FILE_BYTES = 10 * 1024 * 1024   # 10 MB per file
-MAX_OUTPUT_FILES = 20                       # files per execution
+MAX_OUTPUT_FILE_BYTES = MAX_ARTIFACT_BYTES
+MAX_OUTPUT_FILES = MAX_ARTIFACTS
 MAX_INLINE_PLOTLY_JS_BYTES = 2 * 1024 * 1024  # threshold for CDN rewrite
 
 # Matches the <script> block that carries the inlined plotly.js bundle in
@@ -99,6 +100,8 @@ class DockerExecutionService:
     def _create_tar_achives(self, code: str, requirements: list[str]) -> bytes:
         """Create an archive containing the files under an app directory."""
         validation = ValidationAgent().validate(code, requirements)
+        if not validation.valid:
+            raise ValueError(validation.error or "Generated code failed static validation.")
         package_requirements = validation.requirements
         if len(package_requirements) > len(requirements):
             logger.warning(
@@ -129,6 +132,11 @@ class DockerExecutionService:
             info = tarfile.TarInfo(name='app/main.py')
             info.size = len(code_bytes)
             tar.addfile(tarinfo=info, fileobj=io.BytesIO(code_bytes))
+
+            helpers_bytes = Path(__file__).with_name("runtime_helpers.py").read_bytes()
+            helpers_info = tarfile.TarInfo(name="app/helpers.py")
+            helpers_info.size = len(helpers_bytes)
+            tar.addfile(tarinfo=helpers_info, fileobj=io.BytesIO(helpers_bytes))
 
             # run.sh
             pip_line = ""
@@ -176,7 +184,7 @@ class DockerExecutionService:
                 "  ! -name srv ! -name boot ! -name lost+found ! -name .dockerenv\n"
                 "if [ -d /app ]; then \\\n"
                 "  collect_artifacts /app -xdev -type f \\\n"
-                "    ! -path '/app/output*' ! -name main.py ! -name run.sh\n"
+                "    ! -path '/app/output*' ! -name main.py ! -name run.sh ! -name helpers.py\n"
                 "fi\n"
             )
             run_script = (
@@ -226,6 +234,7 @@ class DockerExecutionService:
             cap_drop=["ALL"],
             security_opt=["no-new-privileges:true"],
             user="65534:65534",  # nobody:nogroup in python:3.11-slim
+            environment={},
         )
         # /output is part of the container's writable layer so Docker's
         # get_archive can read it after the process exits. Docker omits tmpfs
@@ -320,6 +329,18 @@ class DockerExecutionService:
             with tarfile.open(fileobj=tar_stream, mode='r') as tar:
                 for member in tar.getmembers():
                     if member.isfile():
+                        if member.size > MAX_OUTPUT_FILE_BYTES:
+                            logger.warning(
+                                "Output file skipped task_id=%s file=%s size_bytes=%d limit_bytes=%d",
+                                self.task_id, member.name, member.size, MAX_OUTPUT_FILE_BYTES,
+                            )
+                            continue
+                        if len(raw_files) >= MAX_OUTPUT_FILES:
+                            logger.warning(
+                                "Output file skipped task_id=%s file=%s reason=file_limit",
+                                self.task_id, member.name,
+                            )
+                            continue
                         f = tar.extractfile(member)
                         if f:
                             content = f.read()
@@ -365,6 +386,8 @@ class DockerExecutionService:
         started_at = time.monotonic()
         container = None
         stdout_lines: list[str] = []
+        output_chars = 0
+        output_truncated = False
 
         try:
             container = await loop.run_in_executor(None, self._create_container)
@@ -418,13 +441,32 @@ class DockerExecutionService:
                     raise
                 if line is None:
                     break
-                stdout_lines.append(line)
+                if output_chars >= MAX_STDOUT_CHARS:
+                    if not output_truncated:
+                        await bus.publish({
+                            "type": "log",
+                            "content": "[Output truncated at the configured size limit.]",
+                        })
+                        output_truncated = True
+                    continue
+                cleaned_line = clean_output(line)
+                remaining = MAX_STDOUT_CHARS - output_chars
+                if len(cleaned_line) > remaining:
+                    cleaned_line = cleaned_line[:remaining]
+                    output_truncated = True
+                stdout_lines.append(cleaned_line)
+                output_chars += len(cleaned_line) + 1
                 await bus.publish(
                     {
                         "type": "log",
-                        "content": line,
+                        "content": cleaned_line,
                     }
                 )
+                if output_truncated:
+                    await bus.publish({
+                        "type": "log",
+                        "content": "[Output truncated at the configured size limit.]",
+                    })
 
             # Wait for container to finish
             result = await asyncio.wait_for(
